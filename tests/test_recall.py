@@ -20,8 +20,12 @@ class RecallTests(unittest.TestCase):
             self.assertEqual(len(results), 1)
             result = results[0]
             expected = hashlib.sha256(b"notes/registry.md\0Registry\0" + b"0").hexdigest()[:12]
-            self.assertEqual(result, RecallResult(expected, "notes/registry.md", "Registry", 0, "Registry\nThe central registry decision."))
-            self.assertEqual(expand_result(bank, result.result_id), "The central registry decision.")
+            self.assertEqual(result, RecallResult(expected, "notes/registry.md", "Registry", 0, "# Registry\nThe central registry decision."))
+            expanded = expand_result(bank, result.result_id)
+            self.assertEqual(expanded.path, "notes/registry.md")
+            self.assertEqual(expanded.heading, "Registry")
+            self.assertEqual(expanded.offset, 0)
+            self.assertEqual(expanded.snippet, "# Registry\n\nThe central registry decision.")
             self.assertEqual(note.read_bytes(), before)
 
     def test_missing_optional_directories_and_empty_query(self):
@@ -45,6 +49,16 @@ class RecallTests(unittest.TestCase):
             with self.assertRaises(MbError) as raised:
                 expand_result(bank, "unknown")
             self.assertEqual(raised.exception.exit_code, 1)
+
+    def test_searches_plan_sources_and_is_stable(self):
+        with tempfile.TemporaryDirectory() as root:
+            bank = Path(root) / ".memory-bank"
+            (bank / "plans" / "done").mkdir(parents=True)
+            (bank / "plans" / "active.md").write_text("# Plan\nregistry active\n", encoding="utf-8")
+            (bank / "plans" / "done" / "done.md").write_text("# Done\nregistry done\n", encoding="utf-8")
+            first = search(bank, "registry")
+            self.assertEqual(first, search(bank, "registry"))
+            self.assertEqual([item.path for item in first], ["plans/active.md", "plans/done/done.md"])
 
 
 if __name__ == "__main__":

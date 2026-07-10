@@ -37,13 +37,13 @@ def _chunks(text: str, filename: str) -> list[tuple[str, int, str]]:
     chunks = []
     for index, match in enumerate(matches):
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        body = text[match.end():end]
+        body = text[match.start():end]
         chunks.append((match.group(1).strip(), match.start(), body))
     return chunks
 
 
 def _snippet(heading: str, body: str) -> str:
-    lines = [line.strip() for line in (heading + "\n" + body).splitlines() if line.strip()]
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
     return "\n".join(lines[:2])[:240]
 
 
@@ -70,14 +70,20 @@ def search(bank: Path, query: str) -> list[RecallResult]:
     return [result for _, result in results[:10]]
 
 
-def expand_result(bank: Path, result_id: str) -> str:
+def expand_result(bank: Path, result_id: str) -> RecallResult:
     bank = Path(bank)
     for path in _files(bank):
         relative = path.relative_to(bank).as_posix()
         text = path.read_text(encoding="utf-8")
         for heading, offset, body in _chunks(text, path.name):
             if _result_id(relative, heading, offset) == result_id:
-                return body.strip()
+                return RecallResult(
+                    result_id,
+                    relative,
+                    heading,
+                    offset,
+                    body.rstrip(),
+                )
     raise MbError(f"unknown recall result: {result_id}", 1)
 
 
