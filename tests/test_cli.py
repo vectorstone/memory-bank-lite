@@ -72,15 +72,19 @@ class CliTest(unittest.TestCase):
             subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", "git@github.com:example/repo.git"], check=True)
             env = {**os.environ, "MB_LITE_HOME": str(home)}
             subprocess.run(["python3", str(CLI), "--project-root", str(repo), "init"], env=env, check=True, capture_output=True)
+            bank = next((home / "projects").glob("*/.memory-bank"))
+            before_revision = {path.name: path.read_bytes() for path in bank.iterdir() if path.is_file()}
             revision = subprocess.run(["python3", str(CLI), "--project-root", str(repo), "done", "--revision", "--json"], env=env, capture_output=True, text=True)
             self.assertEqual(revision.returncode, 0, revision.stderr)
-            bank = next((home / "projects").glob("*/.memory-bank"))
-            before = {path.name: path.read_bytes() for path in bank.iterdir() if path.is_file()}
             self.assertEqual(len(json.loads(revision.stdout)["bank_revision"]), 64)
-            after = {path.name: path.read_bytes() for path in bank.iterdir() if path.is_file()}
-            self.assertEqual(before, after)
+            after_revision = {path.name: path.read_bytes() for path in bank.iterdir() if path.is_file()}
+            self.assertEqual(before_revision, after_revision)
+            before_rejected_apply = {path.name: path.read_bytes() for path in bank.iterdir() if path.is_file()}
             rejected = subprocess.run(["python3", str(CLI), "--project-root", str(repo), "done", "--apply"], env=env, input="", capture_output=True, text=True)
             self.assertEqual(rejected.returncode, 1)
+            self.assertIn("confirmed JSON payload", rejected.stderr)
+            after_rejected_apply = {path.name: path.read_bytes() for path in bank.iterdir() if path.is_file()}
+            self.assertEqual(before_rejected_apply, after_rejected_apply)
 
 if __name__ == "__main__":
     unittest.main()

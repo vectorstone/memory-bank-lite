@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 import argparse
 from dataclasses import asdict
-from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import sys
 from mb_lite.bank import initialize_bank, validate_bank
-from mb_lite.done import DonePayload, apply_done, bank_revision
 from mb_lite.errors import MbError
 from mb_lite.identity import resolve_identity
 from mb_lite.recall import expand_result, search
@@ -45,6 +43,9 @@ def main(argv=None) -> int:
         print(json.dumps(payload, ensure_ascii=False) if args.json else f"Initialized {entry.bank_path}"); return 0
     identity, bank = _bank(args, store); validate_bank(bank)
     if args.action == "done":
+        from datetime import datetime, timezone
+        from mb_lite.done import DonePayload, apply_done, bank_revision
+
         if args.revision:
             payload = {"repository_key": identity.key, "bank_path": str(bank), "bank_revision": bank_revision(bank)}
             print(json.dumps(payload, ensure_ascii=False) if args.json else payload["bank_revision"]); return 0
