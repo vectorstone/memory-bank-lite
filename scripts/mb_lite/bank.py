@@ -10,7 +10,7 @@ def template_root() -> Path:
     return Path(__file__).resolve().parents[2] / "templates" / ".memory-bank"
 
 
-def initialize_bank(bank: Path) -> Path:
+def initialize_bank(bank: Path) -> None:
     bank = Path(bank)
     bank.mkdir(parents=True, exist_ok=True)
     (bank / "notes").mkdir(exist_ok=True)
