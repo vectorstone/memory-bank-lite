@@ -54,6 +54,41 @@ class RegistryTest(unittest.TestCase):
             sort_keys=True,
         ).encode("utf-8")
 
+    def _lookup_during_regular_registry_replacement(self):
+        self.store.register(self.identity)
+        replacement_data = json.loads(
+            self.store.path.read_text(encoding="utf-8")
+        )
+        replacement_roots = ["/tmp/onduty-replaced"]
+        replacement_data["projects"][self.identity.key]["known_roots"] = (
+            replacement_roots
+        )
+        replacement = self.home / "replacement-registry.json"
+        replacement.write_text(
+            json.dumps(replacement_data, sort_keys=True),
+            encoding="utf-8",
+        )
+        real_open = os.open
+        replaced = False
+
+        def replace_before_open(path, flags, *args):
+            nonlocal replaced
+            if not replaced and Path(path) == self.store.path:
+                os.replace(replacement, self.store.path)
+                replaced = True
+            return real_open(path, flags, *args)
+
+        with patch(
+            "scripts.mb_lite.registry.os.open",
+            autospec=True,
+            side_effect=replace_before_open,
+        ):
+            entry = self.store.lookup(self.identity.key)
+
+        self.assertTrue(replaced)
+        self.assertEqual(entry.known_roots, tuple(replacement_roots))
+        return entry
+
     def test_register_is_idempotent_and_tracks_known_root(self) -> None:
         first = self.store.register(self.identity)
         second = self.store.register(self.identity)
@@ -174,7 +209,71 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(os.readlink(self.store.path), original_link)
         self.assertEqual(target.read_bytes(), target_bytes)
 
-    def test_registry_symlink_swap_after_lstat_fails_closed(self) -> None:
+    def test_native_lookup_accepts_atomic_regular_replacement(self) -> None:
+        if not getattr(os, "O_NOFOLLOW", 0):
+            self.skipTest("O_NOFOLLOW is unavailable")
+
+        self._lookup_during_regular_registry_replacement()
+
+    def test_fallback_lookup_retries_atomic_regular_replacement(self) -> None:
+        with patch(
+            "scripts.mb_lite.registry.os.O_NOFOLLOW",
+            0,
+            create=True,
+        ):
+            self._lookup_during_regular_registry_replacement()
+
+    def test_native_registry_symlink_swap_during_open_fails_closed(self) -> None:
+        if not getattr(os, "O_NOFOLLOW", 0):
+            self.skipTest("O_NOFOLLOW is unavailable")
+        self.store.register(self.identity)
+        original = self.store.path.read_bytes()
+        target = self.home / "native-swapped-registry.json"
+        target.write_bytes(original)
+        changed = RepositoryIdentity(
+            root=Path("/tmp/onduty-renamed"),
+            key="github.com/example/onduty-renamed",
+            slug="onduty-renamed",
+            digest="abcdef123456",
+            project_id="onduty-renamed-abcdef123456",
+            remote="git@github.com:example/onduty-renamed.git",
+        )
+        operations = {
+            "lookup": lambda: self.store.lookup(self.identity.key),
+            "register": lambda: self.store.register(self.identity),
+            "adopt": lambda: self.store.adopt(changed, self.identity.key),
+        }
+        real_open = os.open
+
+        for name, operation in operations.items():
+            with self.subTest(name=name):
+                if os.path.lexists(self.store.path):
+                    self.store.path.unlink()
+                self.store.path.write_bytes(original)
+                swapped = False
+
+                def swap_before_open(path, flags, *args):
+                    nonlocal swapped
+                    if not swapped and Path(path) == self.store.path:
+                        self.store.path.unlink()
+                        self.store.path.symlink_to(target)
+                        swapped = True
+                    return real_open(path, flags, *args)
+
+                with patch(
+                    "scripts.mb_lite.registry.os.open",
+                    autospec=True,
+                    side_effect=swap_before_open,
+                ):
+                    with self.assertRaises(MbError) as raised:
+                        operation()
+
+                self.assertEqual(raised.exception.exit_code, 4)
+                self.assertTrue(swapped)
+                self.assertTrue(self.store.path.is_symlink())
+                self.assertEqual(target.read_bytes(), original)
+
+    def test_fallback_registry_symlink_swap_after_lstat_fails_closed(self) -> None:
         self.store.register(self.identity)
         original = self.store.path.read_bytes()
         target = self.home / "swapped-registry.json"
@@ -210,10 +309,17 @@ class RegistryTest(unittest.TestCase):
                         swapped = True
                     return registry_stat
 
-                with patch(
-                    "scripts.mb_lite.registry.Path.lstat",
-                    autospec=True,
-                    side_effect=swap_after_lstat,
+                with (
+                    patch(
+                        "scripts.mb_lite.registry.os.O_NOFOLLOW",
+                        0,
+                        create=True,
+                    ),
+                    patch(
+                        "scripts.mb_lite.registry.Path.lstat",
+                        autospec=True,
+                        side_effect=swap_after_lstat,
+                    ),
                 ):
                     with self.assertRaises(MbError) as raised:
                         operation()

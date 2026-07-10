@@ -52,30 +52,95 @@ class RegistryStore:
             "projects": {},
         }
 
-    def _load(self, allow_missing: bool) -> dict[str, object]:
+    @staticmethod
+    def _close_descriptor(descriptor: int) -> None:
         try:
-            registry_stat = self.path.lstat()
+            os.close(descriptor)
+        except OSError:
+            pass
+
+    def _missing_registry(self, allow_missing: bool, exc: OSError) -> None:
+        if os.path.lexists(self.path):
+            raise MbError("corrupt registry: invalid registry path", 4) from exc
+        if allow_missing:
+            return None
+        raise MbError("registry is not initialized", 2) from exc
+
+    def _open_registry_native(
+        self,
+        allow_missing: bool,
+        no_follow: int,
+    ) -> int | None:
+        try:
+            descriptor = os.open(self.path, os.O_RDONLY | no_follow)
         except FileNotFoundError as exc:
-            if os.path.lexists(self.path):
-                raise MbError("corrupt registry: invalid registry path", 4) from exc
-            if allow_missing:
-                return self._empty()
-            raise MbError("registry is not initialized", 2) from exc
+            self._missing_registry(allow_missing, exc)
+            return None
         except OSError as exc:
             raise MbError(f"corrupt registry: {exc}", 4) from exc
-        if not stat.S_ISREG(registry_stat.st_mode):
-            raise MbError("corrupt registry: registry path is not a regular file", 4)
-        descriptor: int | None = None
         try:
-            open_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-            descriptor = os.open(self.path, open_flags)
             opened_stat = os.fstat(descriptor)
+        except OSError as exc:
+            self._close_descriptor(descriptor)
+            raise MbError(f"corrupt registry: {exc}", 4) from exc
+        if not stat.S_ISREG(opened_stat.st_mode):
+            self._close_descriptor(descriptor)
+            raise MbError("corrupt registry: registry path is not a regular file", 4)
+        return descriptor
+
+    def _open_registry_fallback(self, allow_missing: bool) -> int | None:
+        observed_registry = False
+        for _ in range(2):
+            try:
+                registry_stat = self.path.lstat()
+            except FileNotFoundError as exc:
+                if observed_registry:
+                    raise MbError("corrupt registry: registry path changed", 4) from exc
+                self._missing_registry(allow_missing, exc)
+                return None
+            except OSError as exc:
+                raise MbError(f"corrupt registry: {exc}", 4) from exc
+            observed_registry = True
+            if not stat.S_ISREG(registry_stat.st_mode):
+                raise MbError(
+                    "corrupt registry: registry path is not a regular file",
+                    4,
+                )
+            descriptor: int | None = None
+            try:
+                descriptor = os.open(self.path, os.O_RDONLY)
+                opened_stat = os.fstat(descriptor)
+            except FileNotFoundError:
+                if descriptor is not None:
+                    self._close_descriptor(descriptor)
+                continue
+            except OSError as exc:
+                if descriptor is not None:
+                    self._close_descriptor(descriptor)
+                raise MbError(f"corrupt registry: {exc}", 4) from exc
+            if not stat.S_ISREG(opened_stat.st_mode):
+                self._close_descriptor(descriptor)
+                raise MbError(
+                    "corrupt registry: registry path is not a regular file",
+                    4,
+                )
             if (
-                not stat.S_ISREG(opened_stat.st_mode)
-                or opened_stat.st_dev != registry_stat.st_dev
-                or opened_stat.st_ino != registry_stat.st_ino
+                opened_stat.st_dev == registry_stat.st_dev
+                and opened_stat.st_ino == registry_stat.st_ino
             ):
-                raise MbError("corrupt registry: registry path changed", 4)
+                return descriptor
+            self._close_descriptor(descriptor)
+        raise MbError("corrupt registry: registry path changed", 4)
+
+    def _load(self, allow_missing: bool) -> dict[str, object]:
+        no_follow = getattr(os, "O_NOFOLLOW", 0)
+        if no_follow:
+            descriptor = self._open_registry_native(allow_missing, no_follow)
+        else:
+            descriptor = self._open_registry_fallback(allow_missing)
+        if descriptor is None:
+            return self._empty()
+        try:
             registry_file = os.fdopen(descriptor, "r", encoding="utf-8")
             descriptor = None
             with registry_file:
@@ -86,10 +151,7 @@ class RegistryStore:
             raise MbError(f"corrupt registry: {exc}", 4) from exc
         finally:
             if descriptor is not None:
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
+                self._close_descriptor(descriptor)
         if (
             not isinstance(data, dict)
             or set(data) != {"version", "projects_root", "projects"}
