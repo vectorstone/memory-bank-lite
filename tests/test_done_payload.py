@@ -10,13 +10,18 @@ class DonePayloadTests(unittest.TestCase):
     def test_revision_changes_when_any_core_file_changes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             bank = Path(directory)
-            for name in ("status.md", "checklist.md", "progress.md"):
+            core_files = ("status.md", "checklist.md", "progress.md")
+            for name in core_files:
                 (bank / name).write_text(name, encoding="utf-8")
             from scripts.mb_lite.done import bank_revision
 
-            first = bank_revision(bank)
-            (bank / "checklist.md").write_text("changed", encoding="utf-8")
-            self.assertNotEqual(bank_revision(bank), first)
+            for name in core_files:
+                with self.subTest(core_file=name):
+                    original = bank_revision(bank)
+                    current = (bank / name).read_text(encoding="utf-8")
+                    (bank / name).write_text(f"{current}\nchanged", encoding="utf-8")
+                    self.assertNotEqual(bank_revision(bank), original)
+                    (bank / name).write_text(current, encoding="utf-8")
 
     def test_payload_requires_fixed_field_types(self) -> None:
         from scripts.mb_lite.done import DonePayload
