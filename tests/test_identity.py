@@ -1,4 +1,5 @@
 from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -15,6 +16,11 @@ class IdentityTest(unittest.TestCase):
             normalize_remote("https://token@github.com/example/onduty.git?x=1#f"),
             expected,
         )
+
+    def test_malformed_remote_is_rejected_with_mb_error(self) -> None:
+        with self.assertRaisesRegex(MbError, "unsupported Git remote URL") as raised:
+            normalize_remote("https://[broken")
+        self.assertEqual(raised.exception.exit_code, 1)
 
     @patch("scripts.mb_lite.identity._git")
     def test_push_default_wins_over_origin(self, git) -> None:
@@ -83,11 +89,33 @@ class IdentityTest(unittest.TestCase):
 
     @patch("scripts.mb_lite.identity._git")
     def test_no_remote_falls_back_to_canonical_root(self, git) -> None:
+        reported = Path("/tmp/repo")
+        expected = reported.resolve()
         git.side_effect = lambda root, *args: {
-            ("rev-parse", "--show-toplevel"): "/tmp/repo",
+            ("rev-parse", "--show-toplevel"): str(reported),
             ("config", "--get", "remote.pushDefault"): "",
             ("remote",): "",
         }[args]
-        identity = resolve_identity(Path("/tmp/repo"))
-        self.assertEqual(identity.key, "local:/tmp/repo")
+        identity = resolve_identity(reported)
+        self.assertEqual(identity.root, expected)
+        self.assertEqual(identity.key, f"local:{expected}")
         self.assertIsNone(identity.remote)
+
+    @patch("scripts.mb_lite.identity._git")
+    def test_no_remote_canonicalizes_repository_root(self, git) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            nested = repository / "nested"
+            nested.mkdir()
+            reported = nested / ".."
+            git.side_effect = lambda root, *args: {
+                ("rev-parse", "--show-toplevel"): str(reported),
+                ("config", "--get", "remote.pushDefault"): "",
+                ("remote",): "",
+            }[args]
+
+            identity = resolve_identity(reported)
+
+            expected = repository.resolve()
+            self.assertEqual(identity.root, expected)
+            self.assertEqual(identity.key, f"local:{expected}")

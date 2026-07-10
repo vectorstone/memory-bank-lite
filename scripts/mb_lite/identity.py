@@ -38,8 +38,11 @@ def normalize_remote(value: str) -> str:
     if scp and "://" not in raw:
         host, path = scp.group(1), scp.group(2)
     else:
-        parsed = urlsplit(raw)
-        host, path = parsed.hostname or "", parsed.path
+        try:
+            parsed = urlsplit(raw)
+            host, path = parsed.hostname or "", parsed.path
+        except ValueError as exc:
+            raise MbError(f"unsupported Git remote URL: {value}", 1) from exc
     host = host.lower()
     path = path.strip("/")
     if path.endswith(".git"):
@@ -56,7 +59,7 @@ def _slug(key: str) -> str:
 
 
 def resolve_identity(project_root: Path) -> RepositoryIdentity:
-    root = Path(_git(project_root, "rev-parse", "--show-toplevel")).absolute()
+    root = Path(_git(project_root, "rev-parse", "--show-toplevel")).resolve()
     push_default = _git(root, "config", "--get", "remote.pushDefault")
     remotes = [line for line in _git(root, "remote").splitlines() if line]
     if push_default:
