@@ -66,6 +66,100 @@ class DonePayloadTests(unittest.TestCase):
         ):
             DonePayload.from_json(raw)
 
+    def test_payload_accepts_valid_note_object(self) -> None:
+        from scripts.mb_lite.done import DonePayload
+
+        raw = json.dumps(
+            {
+                "bank_revision": "a" * 64,
+                "summary": "Implemented registry",
+                "decisions": ["Use one central registry"],
+                "next_steps": [],
+                "blockers": [],
+                "key_files": [],
+                "completed_items": [],
+                "new_items": [],
+                "note": {
+                    "title": "Session note",
+                    "body": "Kept the payload contract small.",
+                },
+            }
+        )
+
+        payload = DonePayload.from_json(raw)
+        self.assertIsNotNone(payload.note)
+        self.assertEqual(payload.note.title, "Session note")
+        self.assertEqual(payload.note.body, "Kept the payload contract small.")
+
+    def test_payload_rejects_blank_note_title(self) -> None:
+        from scripts.mb_lite.done import DonePayload
+
+        raw = json.dumps(
+            {
+                "bank_revision": "a" * 64,
+                "summary": "Implemented registry",
+                "decisions": ["Use one central registry"],
+                "next_steps": [],
+                "blockers": [],
+                "key_files": [],
+                "completed_items": [],
+                "new_items": [],
+                "note": {"title": "   ", "body": "Body"},
+            }
+        )
+
+        with self.assertRaisesRegex(
+            MbError,
+            "note title and body must be non-empty",
+        ):
+            DonePayload.from_json(raw)
+
+    def test_payload_rejects_blank_note_body(self) -> None:
+        from scripts.mb_lite.done import DonePayload
+
+        raw = json.dumps(
+            {
+                "bank_revision": "a" * 64,
+                "summary": "Implemented registry",
+                "decisions": ["Use one central registry"],
+                "next_steps": [],
+                "blockers": [],
+                "key_files": [],
+                "completed_items": [],
+                "new_items": [],
+                "note": {"title": "Title", "body": "   "},
+            }
+        )
+
+        with self.assertRaisesRegex(
+            MbError,
+            "note title and body must be non-empty",
+        ):
+            DonePayload.from_json(raw)
+
+    def test_payload_rejects_non_object_note(self) -> None:
+        from scripts.mb_lite.done import DonePayload
+
+        raw = json.dumps(
+            {
+                "bank_revision": "a" * 64,
+                "summary": "Implemented registry",
+                "decisions": ["Use one central registry"],
+                "next_steps": [],
+                "blockers": [],
+                "key_files": [],
+                "completed_items": [],
+                "new_items": [],
+                "note": "not-an-object",
+            }
+        )
+
+        with self.assertRaisesRegex(
+            MbError,
+            "note must be null or an object with title and body",
+        ):
+            DonePayload.from_json(raw)
+
 
 if __name__ == "__main__":
     unittest.main()
