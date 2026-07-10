@@ -30,7 +30,9 @@ def main(argv=None) -> int:
     args = _parser().parse_args(argv); store = RegistryStore(_home())
     if args.action == "init":
         identity = resolve_identity(args.project_root)
-        if args.adopt and not args.confirm_adopt: raise MbError("init --adopt requires --confirm-adopt after explicit user confirmation", 1)
+        if args.adopt and not args.confirm_adopt:
+            old = store.lookup(args.adopt)
+            raise MbError(f"init --adopt {args.adopt} requires --confirm-adopt; reuse Bank {old.bank_path}", 1)
         if args.confirm_adopt and not args.adopt: raise MbError("--confirm-adopt requires --adopt OLD_REPOSITORY_KEY", 1)
         if args.adopt:
             old = store.lookup(args.adopt); validate_bank(old.bank_path); entry = store.adopt(identity, args.adopt)
