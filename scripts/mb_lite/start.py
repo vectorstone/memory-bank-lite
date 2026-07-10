@@ -65,7 +65,15 @@ def _recent(progress: str) -> list[str]:
     if len(lite) >= 3:
         return lite[-3:]
     legacy_source = ENTRY_RE.sub("", progress)
-    legacy = [entry.strip() for entry in re.findall(r"(?ms)^###\s+.+?(?=^###\s+|\Z)", legacy_source)]
+    canonical_lite = {
+        re.sub(r"^<!-- mb-lite-entry:[^>]+ -->\s*", "", entry).strip()
+        for entry in lite
+    }
+    legacy = []
+    for entry in re.findall(r"(?ms)^###\s+.+?(?=^###\s+|\Z)", legacy_source):
+        normalized = entry.strip()
+        if normalized not in canonical_lite:
+            legacy.append(normalized)
     return legacy[-(3 - len(lite)):] + lite
 
 

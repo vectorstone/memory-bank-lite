@@ -35,6 +35,12 @@ class StartTests(unittest.TestCase):
             self.assertIn("Legacy two", output)
             self.assertEqual(output.count("New"), 1)
 
+    def test_legacy_entry_matching_lite_entry_is_emitted_once(self):
+        with tempfile.TemporaryDirectory() as root:
+            bank = self.make_bank(root, "**Focus:** X\n", "- [ ] item\n", "### Same entry\nbody\n<!-- mb-lite-entry:new -->\n### Same entry\nbody\n")
+            output = build_start_context(bank, "recent-progress")
+            self.assertEqual(output.count("### Same entry"), 1)
+
     def test_first_open_stage_and_at_most_five_matching_note_titles(self):
         with tempfile.TemporaryDirectory() as root:
             bank = self.make_bank(root, "**Focus:** Registry\n", "- [ ] item\n", "")
