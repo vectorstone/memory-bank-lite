@@ -145,6 +145,31 @@ class RegistryTest(unittest.TestCase):
                 self.assertEqual(raised.exception.exit_code, 4)
                 self.assertEqual(self.store.path.read_bytes(), original)
 
+    def test_nul_bank_path_is_rejected_without_overwrite(self) -> None:
+        registry = {
+            "version": 1,
+            "projects_root": str(self.store.projects_root),
+            "projects": {
+                "github.com/example/unrelated": {
+                    "project_id": "unrelated-123456789abc",
+                    "remote": None,
+                    "bank_path": "\0",
+                    "known_roots": ["/tmp/unrelated"],
+                }
+            },
+        }
+        original = json.dumps(registry, sort_keys=True).encode("utf-8")
+        self.store.path.write_bytes(original)
+
+        with self.assertRaisesRegex(
+            MbError,
+            "corrupt registry schema",
+        ) as raised:
+            self.store.register(self.identity)
+
+        self.assertEqual(raised.exception.exit_code, 4)
+        self.assertEqual(self.store.path.read_bytes(), original)
+
     def test_lookup_rejects_bank_outside_projects_root(self) -> None:
         self.store.register(self.identity)
         registry = json.loads(self.store.path.read_text(encoding="utf-8"))

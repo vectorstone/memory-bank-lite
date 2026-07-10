@@ -178,9 +178,11 @@ class RegistryStore:
             raise MbError("corrupt registry schema", 4)
         try:
             resolved_bank_path = Path(raw_bank_path).resolve()
-            resolved_bank_path.relative_to(self.projects_root.resolve())
-        except (OSError, RuntimeError) as exc:
+            resolved_projects_root = self.projects_root.resolve()
+        except (OSError, RuntimeError, ValueError) as exc:
             raise MbError("corrupt registry schema", 4) from exc
+        try:
+            resolved_bank_path.relative_to(resolved_projects_root)
         except ValueError as exc:
             raise MbError(
                 f"bank path is outside projects_root: {resolved_bank_path}",
