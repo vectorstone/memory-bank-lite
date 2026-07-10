@@ -63,5 +63,24 @@ class CliTest(unittest.TestCase):
             expanded = json.loads(subprocess.run(["python3", str(CLI), "--project-root", str(repo), "recall", "--expand", found[0]["result_id"], "--json"], env=env, capture_output=True, text=True, check=True).stdout)
             self.assertEqual(expanded["heading"], "Unique Recall"); self.assertIn("# Unique Recall", expanded["snippet"])
 
+    def test_done_revision_is_read_only_and_apply_requires_payload(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            repo = root / "repo"
+            home = root / "memory"
+            subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", "git@github.com:example/repo.git"], check=True)
+            env = {**os.environ, "MB_LITE_HOME": str(home)}
+            subprocess.run(["python3", str(CLI), "--project-root", str(repo), "init"], env=env, check=True, capture_output=True)
+            revision = subprocess.run(["python3", str(CLI), "--project-root", str(repo), "done", "--revision", "--json"], env=env, capture_output=True, text=True)
+            self.assertEqual(revision.returncode, 0, revision.stderr)
+            bank = next((home / "projects").glob("*/.memory-bank"))
+            before = {path.name: path.read_bytes() for path in bank.iterdir() if path.is_file()}
+            self.assertEqual(len(json.loads(revision.stdout)["bank_revision"]), 64)
+            after = {path.name: path.read_bytes() for path in bank.iterdir() if path.is_file()}
+            self.assertEqual(before, after)
+            rejected = subprocess.run(["python3", str(CLI), "--project-root", str(repo), "done", "--apply"], env=env, input="", capture_output=True, text=True)
+            self.assertEqual(rejected.returncode, 1)
+
 if __name__ == "__main__":
     unittest.main()
