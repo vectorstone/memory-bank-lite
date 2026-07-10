@@ -60,6 +60,18 @@ class RecallTests(unittest.TestCase):
             self.assertEqual(first, search(bank, "registry"))
             self.assertEqual([item.path for item in first], ["plans/active.md", "plans/done/done.md"])
 
+    def test_symlink_sources_are_not_read(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as outside:
+            bank = Path(root) / ".memory-bank"
+            (bank / "notes").mkdir(parents=True)
+            outside_note = Path(outside) / "secret.md"
+            outside_note.write_text("# Secret\nregistry outside\n", encoding="utf-8")
+            (bank / "notes" / "linked.md").symlink_to(outside_note)
+            (bank / "plans").mkdir()
+            (bank / "plans" / "linked.md").symlink_to(outside_note)
+            (bank / "progress.md").symlink_to(outside_note)
+            self.assertEqual(search(bank, "registry"), [])
+
 
 if __name__ == "__main__":
     unittest.main()

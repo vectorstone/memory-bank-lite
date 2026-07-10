@@ -23,11 +23,21 @@ _SOURCES = ("progress.md", "backlog.md")
 
 
 def _files(bank: Path) -> list[Path]:
+    bank = bank.resolve()
     files = [bank / name for name in _SOURCES]
     for directory in (bank / "notes", bank / "plans", bank / "plans" / "done"):
-        if directory.is_dir():
+        if directory.is_dir() and not directory.is_symlink():
             files.extend(sorted(directory.glob("*.md")))
-    return [path for path in files if path.is_file()]
+    accepted = []
+    for path in files:
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            path.resolve().relative_to(bank)
+        except ValueError:
+            continue
+        accepted.append(path)
+    return accepted
 
 
 def _chunks(text: str, filename: str) -> list[tuple[str, int, str]]:
@@ -57,7 +67,7 @@ def search(bank: Path, query: str) -> list[RecallResult]:
     if not terms:
         raise MbError("query must contain a term of at least two characters", 1)
     results: list[tuple[int, RecallResult]] = []
-    bank = Path(bank)
+    bank = Path(bank).resolve()
     for path in _files(bank):
         relative = path.relative_to(bank).as_posix()
         text = path.read_text(encoding="utf-8")
@@ -71,7 +81,7 @@ def search(bank: Path, query: str) -> list[RecallResult]:
 
 
 def expand_result(bank: Path, result_id: str) -> RecallResult:
-    bank = Path(bank)
+    bank = Path(bank).resolve()
     for path in _files(bank):
         relative = path.relative_to(bank).as_posix()
         text = path.read_text(encoding="utf-8")
