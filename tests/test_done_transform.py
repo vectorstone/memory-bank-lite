@@ -58,6 +58,35 @@ class DoneTransformTests(unittest.TestCase):
         with self.assertRaisesRegex(MbError, "expected exactly one unchecked item"):
             render_checklist(source, PAYLOAD)
 
+    def test_checklist_removes_completed_item_from_managed_open_items(self) -> None:
+        from scripts.mb_lite.done import render_checklist
+
+        payload = DonePayload.from_json(
+            """{
+  "bank_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "summary": "Implemented registry",
+  "decisions": ["Use one central registry"],
+  "next_steps": [],
+  "blockers": [],
+  "key_files": [],
+  "completed_items": ["Implement recall"],
+  "new_items": [],
+  "note": null
+}"""
+        )
+        source = (
+            "# Checklist\n"
+            "<!-- mb-lite:open-items:start -->\n"
+            "## Memory Bank Lite Open Items\n\n"
+            "- [ ] Implement recall\n"
+            "<!-- mb-lite:open-items:end -->\n"
+        )
+
+        result = render_checklist(source, payload)
+
+        self.assertNotIn("- [x] Implement recall", result)
+        self.assertNotIn("Memory Bank Lite Open Items", result)
+
     def test_progress_entry_has_stable_marker_and_fixed_sections(self) -> None:
         from scripts.mb_lite.done import render_progress_entry
 

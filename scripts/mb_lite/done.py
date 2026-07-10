@@ -138,6 +138,17 @@ def _replace_or_insert(
     return source + separator + "\n" + block + "\n"
 
 
+def _managed_block(source: str, start: str, end: str) -> re.Match[str] | None:
+    pattern = re.compile(
+        re.escape(start) + r".*?" + re.escape(end),
+        re.DOTALL,
+    )
+    matches = list(pattern.finditer(source))
+    if len(matches) > 1:
+        raise MbError(f"multiple managed blocks found for {start}", 4)
+    return matches[0] if matches else None
+
+
 def render_status(source: str, payload: DonePayload) -> str:
     next_value = "; ".join(payload.next_steps) if payload.next_steps else "None"
     blocker_value = "; ".join(payload.blockers) if payload.blockers else "None"
@@ -192,9 +203,14 @@ def render_checklist(source: str, payload: DonePayload) -> str:
         for item in payload.new_items
         if item not in existing and item not in managed
     ]
-    if not additions:
+    managed_block = _managed_block(result, ITEMS_START, ITEMS_END)
+    if not additions and managed_block is None:
         return result
     combined = managed + tuple(additions)
+    if not combined:
+        if managed_block is None:
+            return result
+        return result[:managed_block.start()] + result[managed_block.end():]
     block = (
         f"{ITEMS_START}\n"
         "## Memory Bank Lite Open Items\n\n"
