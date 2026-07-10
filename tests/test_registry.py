@@ -1,0 +1,123 @@
+import json
+import multiprocessing
+from pathlib import Path
+import tempfile
+import unittest
+
+from scripts.mb_lite.errors import MbError
+from scripts.mb_lite.identity import RepositoryIdentity
+from scripts.mb_lite.registry import RegistryStore
+
+
+def _register_worker(home: str, root: str, queue) -> None:
+    identity = RepositoryIdentity(
+        root=Path(root),
+        key="github.com/example/onduty",
+        slug="onduty",
+        digest="122d9ee9bd04",
+        project_id="onduty-122d9ee9bd04",
+        remote="git@github.com:example/onduty.git",
+    )
+    try:
+        RegistryStore(Path(home)).register(identity)
+    except MbError as exc:
+        queue.put(exc.exit_code)
+    else:
+        queue.put(0)
+
+
+class RegistryTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_home = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary_home.cleanup)
+        self.home = Path(self.temporary_home.name)
+        self.identity = RepositoryIdentity(
+            root=Path("/tmp/onduty"),
+            key="github.com/example/onduty",
+            slug="onduty",
+            digest="122d9ee9bd04",
+            project_id="onduty-122d9ee9bd04",
+            remote="git@github.com:example/onduty.git",
+        )
+        self.store = RegistryStore(self.home)
+
+    def test_register_is_idempotent_and_tracks_known_root(self) -> None:
+        first = self.store.register(self.identity)
+        second = self.store.register(self.identity)
+
+        self.assertEqual(first, second)
+        registry = json.loads(self.store.path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            registry["projects"][self.identity.key]["known_roots"],
+            ["/tmp/onduty"],
+        )
+
+    def test_corrupt_registry_is_never_overwritten(self) -> None:
+        corrupt = b"{broken"
+        self.store.path.write_bytes(corrupt)
+
+        with self.assertRaisesRegex(MbError, "corrupt registry"):
+            self.store.register(self.identity)
+
+        self.assertEqual(self.store.path.read_bytes(), corrupt)
+
+    def test_lookup_rejects_bank_outside_projects_root(self) -> None:
+        self.store.register(self.identity)
+        registry = json.loads(self.store.path.read_text(encoding="utf-8"))
+        registry["projects"][self.identity.key]["bank_path"] = (
+            "/tmp/escape/.memory-bank"
+        )
+        self.store.path.write_text(json.dumps(registry), encoding="utf-8")
+
+        with self.assertRaisesRegex(MbError, "outside projects_root"):
+            self.store.lookup(self.identity.key)
+
+    def test_adopt_reuses_old_bank_and_preserves_old_key(self) -> None:
+        old_entry = self.store.register(self.identity)
+        changed = RepositoryIdentity(
+            root=Path("/tmp/onduty-renamed"),
+            key="github.com/example/onduty-renamed",
+            slug="onduty-renamed",
+            digest="abcdef123456",
+            project_id="onduty-renamed-abcdef123456",
+            remote="git@github.com:example/onduty-renamed.git",
+        )
+
+        adopted = self.store.adopt(changed, self.identity.key)
+
+        self.assertEqual(adopted.bank_path, old_entry.bank_path)
+        self.assertEqual(
+            self.store.lookup(self.identity.key).bank_path,
+            old_entry.bank_path,
+        )
+        self.assertEqual(
+            adopted.known_roots,
+            ("/tmp/onduty", "/tmp/onduty-renamed"),
+        )
+
+    def test_concurrent_registration_preserves_both_known_roots(self) -> None:
+        context = multiprocessing.get_context("spawn")
+        queue = context.Queue()
+        processes = [
+            context.Process(
+                target=_register_worker,
+                args=(str(self.home), f"/tmp/clone-{index}", queue),
+            )
+            for index in range(2)
+        ]
+
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join()
+
+        self.assertEqual([process.exitcode for process in processes], [0, 0])
+        self.assertEqual(sorted(queue.get() for _ in processes), [0, 0])
+        self.assertEqual(
+            self.store.lookup(self.identity.key).known_roots,
+            ("/tmp/clone-0", "/tmp/clone-1"),
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
