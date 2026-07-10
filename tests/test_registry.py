@@ -61,6 +61,90 @@ class RegistryTest(unittest.TestCase):
 
         self.assertEqual(self.store.path.read_bytes(), corrupt)
 
+    def test_invalid_top_level_schema_is_never_overwritten(self) -> None:
+        projects_root = str(self.store.projects_root)
+        cases = {
+            "missing_projects_root": {
+                "version": 1,
+                "projects": {},
+            },
+            "mismatched_projects_root": {
+                "version": 1,
+                "projects_root": "/tmp/other/projects",
+                "projects": {},
+            },
+            "non_string_projects_root": {
+                "version": 1,
+                "projects_root": 7,
+                "projects": {},
+            },
+            "extra_key": {
+                "version": 1,
+                "projects_root": projects_root,
+                "projects": {},
+                "unexpected": True,
+            },
+            "boolean_version": {
+                "version": True,
+                "projects_root": projects_root,
+                "projects": {},
+            },
+        }
+
+        for name, registry in cases.items():
+            with self.subTest(name=name):
+                original = json.dumps(registry, sort_keys=True).encode("utf-8")
+                self.store.path.write_bytes(original)
+
+                with self.assertRaisesRegex(
+                    MbError,
+                    "corrupt registry schema",
+                ) as raised:
+                    self.store.register(self.identity)
+
+                self.assertEqual(raised.exception.exit_code, 4)
+                self.assertEqual(self.store.path.read_bytes(), original)
+
+    def test_invalid_unrelated_entry_is_never_overwritten(self) -> None:
+        valid_entry = {
+            "project_id": "unrelated-123456789abc",
+            "remote": None,
+            "bank_path": str(
+                self.store.projects_root
+                / "unrelated-123456789abc"
+                / ".memory-bank"
+            ),
+            "known_roots": ["/tmp/unrelated"],
+        }
+        cases = {
+            "non_dict_entry": "broken",
+            "empty_project_id": {**valid_entry, "project_id": ""},
+            "empty_remote": {**valid_entry, "remote": ""},
+            "empty_bank_path": {**valid_entry, "bank_path": ""},
+            "empty_known_root": {**valid_entry, "known_roots": [""]},
+            "extra_entry_key": {**valid_entry, "unexpected": True},
+            "escaped_bank_path": {
+                **valid_entry,
+                "bank_path": "/tmp/escape/.memory-bank",
+            },
+        }
+
+        for name, invalid_entry in cases.items():
+            with self.subTest(name=name):
+                registry = {
+                    "version": 1,
+                    "projects_root": str(self.store.projects_root),
+                    "projects": {"github.com/example/unrelated": invalid_entry},
+                }
+                original = json.dumps(registry, sort_keys=True).encode("utf-8")
+                self.store.path.write_bytes(original)
+
+                with self.assertRaises(MbError) as raised:
+                    self.store.register(self.identity)
+
+                self.assertEqual(raised.exception.exit_code, 4)
+                self.assertEqual(self.store.path.read_bytes(), original)
+
     def test_lookup_rejects_bank_outside_projects_root(self) -> None:
         self.store.register(self.identity)
         registry = json.loads(self.store.path.read_text(encoding="utf-8"))

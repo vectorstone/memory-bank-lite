@@ -63,10 +63,17 @@ class RegistryStore:
             raise MbError(f"corrupt registry: {exc}", 4) from exc
         if (
             not isinstance(data, dict)
-            or data.get("version") != 1
+            or set(data) != {"version", "projects_root", "projects"}
+            or type(data["version"]) is not int
+            or data["version"] != 1
+            or not isinstance(data["projects_root"], str)
+            or data["projects_root"] != str(self.projects_root)
             or not isinstance(data.get("projects"), dict)
         ):
             raise MbError("corrupt registry schema", 4)
+        projects = cast(dict[str, object], data["projects"])
+        for raw_entry in projects.values():
+            self._entry(raw_entry)
         return data
 
     def _write(self, data: dict[str, object]) -> None:
@@ -145,7 +152,12 @@ class RegistryStore:
         return self.lookup(identity.key)
 
     def _entry(self, raw_entry: object) -> RegistryEntry:
-        if not isinstance(raw_entry, dict):
+        if not isinstance(raw_entry, dict) or set(raw_entry) != {
+            "project_id",
+            "remote",
+            "bank_path",
+            "known_roots",
+        }:
             raise MbError("corrupt registry schema", 4)
         project_id = raw_entry.get("project_id")
         remote = raw_entry.get("remote")
@@ -153,15 +165,22 @@ class RegistryStore:
         known_roots = raw_entry.get("known_roots")
         if (
             not isinstance(project_id, str)
-            or (remote is not None and not isinstance(remote, str))
+            or not project_id
+            or (
+                remote is not None
+                and (not isinstance(remote, str) or not remote)
+            )
             or not isinstance(raw_bank_path, str)
+            or not raw_bank_path
             or not isinstance(known_roots, list)
-            or not all(isinstance(root, str) for root in known_roots)
+            or not all(isinstance(root, str) and root != "" for root in known_roots)
         ):
             raise MbError("corrupt registry schema", 4)
-        resolved_bank_path = Path(raw_bank_path).resolve()
         try:
+            resolved_bank_path = Path(raw_bank_path).resolve()
             resolved_bank_path.relative_to(self.projects_root.resolve())
+        except (OSError, RuntimeError) as exc:
+            raise MbError("corrupt registry schema", 4) from exc
         except ValueError as exc:
             raise MbError(
                 f"bank path is outside projects_root: {resolved_bank_path}",
