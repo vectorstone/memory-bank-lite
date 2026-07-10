@@ -12,19 +12,29 @@ def template_root() -> Path:
 
 def initialize_bank(bank: Path) -> None:
     bank = Path(bank)
+    if bank.is_symlink():
+        raise MbError(f"missing readable status.md: {bank / 'status.md'}", 4)
     bank.mkdir(parents=True, exist_ok=True)
+    for directory in (bank / "notes", bank / "plans", bank / "plans" / "done"):
+        if directory.is_symlink():
+            raise MbError(f"missing readable status.md: {directory}", 4)
     (bank / "notes").mkdir(exist_ok=True)
     (bank / "plans" / "done").mkdir(parents=True, exist_ok=True)
     for name in CORE_FILES + OPTIONAL_FILES:
         target = bank / name
+        if target.is_symlink():
+            raise MbError(f"missing readable {name}: {target}", 4)
         if not target.exists():
-            target.write_bytes((template_root() / name).read_bytes())
+            source = template_root() / name
+            if source.is_symlink():
+                raise MbError(f"missing readable {name}: {source}", 4)
+            target.write_bytes(source.read_bytes())
 
 
 def validate_bank(bank: Path) -> Path:
     bank = Path(bank)
-    if not bank.is_dir():
-        raise MbError(f"missing readable status.md: {bank / 'status.md'}", 4)
+    if bank.is_symlink() or not bank.is_dir():
+        raise MbError(f"Bank directory does not exist: {bank}", 4)
     for name in CORE_FILES:
         path = bank / name
         try:
