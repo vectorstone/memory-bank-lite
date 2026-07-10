@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from multiprocessing import get_context
 from pathlib import Path
 import json
 import tempfile
@@ -25,6 +26,20 @@ def payload(bank: Path, note: dict[str, str] | None = None) -> DonePayload:
             }
         )
     )
+
+
+def _apply_worker(bank: str, repo: str, raw: str, queue) -> None:
+    try:
+        value = DonePayload.from_json(raw)
+        apply_done(
+            Path(bank),
+            Path(repo),
+            value,
+            datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc),
+        )
+        queue.put(0)
+    except MbError as exc:
+        queue.put(exc.exit_code)
 
 
 class DoneApplyTest(unittest.TestCase):
@@ -106,6 +121,40 @@ class DoneApplyTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(MbError, "key file is outside repository"):
             apply_done(self.bank, self.repo, invalid, datetime.now(timezone.utc))
+
+    def test_two_concurrent_applies_allow_one_writer(self) -> None:
+        draft = payload(self.bank)
+        raw = json.dumps(
+            {
+                "bank_revision": draft.bank_revision,
+                "summary": draft.summary,
+                "decisions": list(draft.decisions),
+                "next_steps": list(draft.next_steps),
+                "blockers": list(draft.blockers),
+                "key_files": list(draft.key_files),
+                "completed_items": list(draft.completed_items),
+                "new_items": list(draft.new_items),
+                "note": None,
+            }
+        )
+        context = get_context("spawn")
+        queue = context.Queue()
+        processes = [
+            context.Process(
+                target=_apply_worker,
+                args=(str(self.bank), str(self.repo), raw, queue),
+            )
+            for _ in range(2)
+        ]
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(10)
+            self.assertEqual(process.exitcode, 0)
+        self.assertEqual(
+            sorted(queue.get(timeout=2) for _ in range(2)),
+            [0, 3],
+        )
 
     def test_apply_without_note_does_not_create_note_directory(self) -> None:
         result = apply_done(
