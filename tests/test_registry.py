@@ -174,6 +174,55 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(os.readlink(self.store.path), original_link)
         self.assertEqual(target.read_bytes(), target_bytes)
 
+    def test_registry_symlink_swap_after_lstat_fails_closed(self) -> None:
+        self.store.register(self.identity)
+        original = self.store.path.read_bytes()
+        target = self.home / "swapped-registry.json"
+        target.write_bytes(original)
+        changed = RepositoryIdentity(
+            root=Path("/tmp/onduty-renamed"),
+            key="github.com/example/onduty-renamed",
+            slug="onduty-renamed",
+            digest="abcdef123456",
+            project_id="onduty-renamed-abcdef123456",
+            remote="git@github.com:example/onduty-renamed.git",
+        )
+        operations = {
+            "lookup": lambda: self.store.lookup(self.identity.key),
+            "register": lambda: self.store.register(self.identity),
+            "adopt": lambda: self.store.adopt(changed, self.identity.key),
+        }
+        real_lstat = Path.lstat
+
+        for name, operation in operations.items():
+            with self.subTest(name=name):
+                if os.path.lexists(self.store.path):
+                    self.store.path.unlink()
+                self.store.path.write_bytes(original)
+                swapped = False
+
+                def swap_after_lstat(path):
+                    nonlocal swapped
+                    registry_stat = real_lstat(path)
+                    if not swapped and Path(path) == self.store.path:
+                        self.store.path.unlink()
+                        self.store.path.symlink_to(target)
+                        swapped = True
+                    return registry_stat
+
+                with patch(
+                    "scripts.mb_lite.registry.Path.lstat",
+                    autospec=True,
+                    side_effect=swap_after_lstat,
+                ):
+                    with self.assertRaises(MbError) as raised:
+                        operation()
+
+                self.assertEqual(raised.exception.exit_code, 4)
+                self.assertTrue(swapped)
+                self.assertTrue(self.store.path.is_symlink())
+                self.assertEqual(target.read_bytes(), original)
+
     def test_write_fsyncs_file_and_parent_directory(self) -> None:
         directory_descriptor = 90210
         directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
@@ -434,21 +483,26 @@ class RegistryTest(unittest.TestCase):
             )
             for index in range(2)
         ]
+        started_processes = []
 
         try:
             for process in processes:
                 process.start()
-            for process in processes:
+                started_processes.append(process)
+            for process in started_processes:
                 process.join(timeout=5)
 
-            for process in processes:
+            for process in started_processes:
                 self.assertFalse(
                     process.is_alive(),
                     f"registration worker {process.pid} timed out",
                 )
-            self.assertEqual([process.exitcode for process in processes], [0, 0])
+            self.assertEqual(
+                [process.exitcode for process in started_processes],
+                [0, 0],
+            )
             try:
-                statuses = [queue.get(timeout=5) for _ in processes]
+                statuses = [queue.get(timeout=5) for _ in started_processes]
             except queue_module.Empty:
                 self.fail("timed out waiting for registration worker result")
             self.assertEqual(sorted(statuses), [0, 0])
@@ -457,13 +511,17 @@ class RegistryTest(unittest.TestCase):
                 ("/tmp/clone-0", "/tmp/clone-1"),
             )
         finally:
-            for process in processes:
-                if process.is_alive():
-                    process.terminate()
-            for process in processes:
-                process.join(timeout=5)
-            queue.close()
-            queue.join_thread()
+            try:
+                for process in started_processes:
+                    if process.is_alive():
+                        process.terminate()
+                for process in started_processes:
+                    process.join(timeout=5)
+            finally:
+                try:
+                    queue.close()
+                finally:
+                    queue.join_thread()
 
 
 if __name__ == "__main__":

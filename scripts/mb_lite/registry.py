@@ -65,11 +65,31 @@ class RegistryStore:
             raise MbError(f"corrupt registry: {exc}", 4) from exc
         if not stat.S_ISREG(registry_stat.st_mode):
             raise MbError("corrupt registry: registry path is not a regular file", 4)
+        descriptor: int | None = None
         try:
-            with self.path.open(encoding="utf-8") as registry_file:
+            open_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(self.path, open_flags)
+            opened_stat = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened_stat.st_mode)
+                or opened_stat.st_dev != registry_stat.st_dev
+                or opened_stat.st_ino != registry_stat.st_ino
+            ):
+                raise MbError("corrupt registry: registry path changed", 4)
+            registry_file = os.fdopen(descriptor, "r", encoding="utf-8")
+            descriptor = None
+            with registry_file:
                 data = json.load(registry_file)
+        except MbError:
+            raise
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise MbError(f"corrupt registry: {exc}", 4) from exc
+        finally:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
         if (
             not isinstance(data, dict)
             or set(data) != {"version", "projects_root", "projects"}
