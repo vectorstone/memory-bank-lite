@@ -1,9 +1,14 @@
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import fcntl
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import re
-from typing import Any
+import tempfile
+from typing import Any, Iterator
 
 from .bank import CORE_FILES
 from .errors import MbError
@@ -247,3 +252,99 @@ def render_progress_entry(payload: DonePayload, timestamp: str) -> str:
         _bullet_section("Key Files", payload.key_files, code=True),
     ]
     return "\n\n".join(sections).rstrip() + "\n"
+
+
+@dataclass(frozen=True)
+class ApplyResult:
+    revision: str
+    note_path: str | None
+
+
+@contextmanager
+def _bank_lock(bank: Path) -> Iterator[None]:
+    lock_path = bank / ".mb-lite.lock"
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        except OSError as exc:
+            raise MbError(f"Bank lock acquisition failed: {exc}", 5) from exc
+        try:
+            yield
+        finally:
+            try:
+                if lock_path.exists() and lock_path.stat().st_size == 0:
+                    lock_path.unlink()
+            except OSError:
+                pass
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    descriptor, name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        dir=path.parent,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def _slug(value: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", value).strip("-").lower()
+    return slug[:60] or "memory-note"
+
+
+def _validate_key_files(repo: Path, values: tuple[str, ...]) -> None:
+    root = repo.resolve()
+    for value in values:
+        candidate = (root / value).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise MbError(f"key file is outside repository: {value}", 1) from exc
+
+
+def apply_done(bank: Path, repo: Path, payload: DonePayload, now: datetime) -> ApplyResult:
+    _validate_key_files(repo, payload.key_files)
+    timestamp = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _bank_lock(bank):
+        current_revision = bank_revision(bank)
+        if current_revision != payload.bank_revision:
+            raise MbError("Bank revision changed; regenerate the done draft", 3)
+        status_path = bank / "status.md"
+        checklist_path = bank / "checklist.md"
+        progress_path = bank / "progress.md"
+        status = render_status(status_path.read_text(encoding="utf-8"), payload)
+        checklist = render_checklist(
+            checklist_path.read_text(encoding="utf-8"),
+            payload,
+        )
+        progress_source = progress_path.read_text(encoding="utf-8")
+        separator = "" if progress_source.endswith("\n") else "\n"
+        progress = (
+            progress_source
+            + separator
+            + "\n"
+            + render_progress_entry(payload, timestamp)
+        )
+        note_relative: str | None = None
+        note_target: Path | None = None
+        note_content: str | None = None
+        if payload.note is not None:
+            note_relative = f"notes/{now:%Y-%m-%d}_{_slug(payload.note.title)}.md"
+            note_target = bank / note_relative
+            if note_target.exists():
+                raise MbError(f"note already exists: {note_relative}", 1)
+            note_target.parent.mkdir(parents=True, exist_ok=True)
+            note_content = f"# {payload.note.title}\n\n{payload.note.body.rstrip()}\n"
+        _atomic_write(status_path, status)
+        _atomic_write(checklist_path, checklist)
+        _atomic_write(progress_path, progress)
+        if note_target is not None and note_content is not None:
+            _atomic_write(note_target, note_content)
+        return ApplyResult(bank_revision(bank), note_relative)
