@@ -83,6 +83,17 @@ class IdentityTest(unittest.TestCase):
             normalize_remote("https://example.com:notaport/Org/Repo.git")
         self.assertEqual(raised.exception.exit_code, 1)
 
+    def test_ipv6_authorities_with_and_without_port_do_not_collide(self) -> None:
+        with_port = normalize_remote(
+            "https://[2001:db8::1]:8443/Org/Repo.git"
+        )
+        address_only = normalize_remote(
+            "https://[2001:db8::1:8443]/Org/Repo.git"
+        )
+        self.assertEqual(with_port, "[2001:db8::1]:8443/Org/Repo")
+        self.assertEqual(address_only, "[2001:db8::1:8443]/Org/Repo")
+        self.assertNotEqual(with_port, address_only)
+
     @patch("scripts.mb_lite.identity._git")
     def test_push_default_wins_over_origin(self, git) -> None:
         git.side_effect = lambda root, *args: {

@@ -61,6 +61,8 @@ def normalize_remote(value: str) -> str:
         except ValueError as exc:
             raise MbError(f"unsupported Git remote URL: {value}", 1) from exc
     host = host.lower()
+    if ":" in host:
+        host = f"[{host}]"
     default_ports = {"http": 80, "https": 443, "ssh": 22, "git": 9418}
     if port is not None and port != default_ports.get(scheme):
         host = f"{host}:{port}"
