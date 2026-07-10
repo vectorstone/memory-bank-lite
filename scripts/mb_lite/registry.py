@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
 from typing import cast
 
@@ -53,12 +54,20 @@ class RegistryStore:
 
     def _load(self, allow_missing: bool) -> dict[str, object]:
         try:
-            with self.path.open(encoding="utf-8") as registry_file:
-                data = json.load(registry_file)
+            registry_stat = self.path.lstat()
         except FileNotFoundError as exc:
+            if os.path.lexists(self.path):
+                raise MbError("corrupt registry: invalid registry path", 4) from exc
             if allow_missing:
                 return self._empty()
             raise MbError("registry is not initialized", 2) from exc
+        except OSError as exc:
+            raise MbError(f"corrupt registry: {exc}", 4) from exc
+        if not stat.S_ISREG(registry_stat.st_mode):
+            raise MbError("corrupt registry: registry path is not a regular file", 4)
+        try:
+            with self.path.open(encoding="utf-8") as registry_file:
+                data = json.load(registry_file)
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise MbError(f"corrupt registry: {exc}", 4) from exc
         if (
@@ -77,12 +86,13 @@ class RegistryStore:
         return data
 
     def _write(self, data: dict[str, object]) -> None:
-        descriptor, temporary_name = tempfile.mkstemp(
-            dir=self.home,
-            prefix=".registry.",
-            suffix=".tmp",
-        )
+        temporary_name: str | None = None
         try:
+            descriptor, temporary_name = tempfile.mkstemp(
+                dir=self.home,
+                prefix=".registry.",
+                suffix=".tmp",
+            )
             with os.fdopen(descriptor, "w", encoding="utf-8") as temporary_file:
                 json.dump(
                     data,
@@ -95,11 +105,20 @@ class RegistryStore:
                 temporary_file.flush()
                 os.fsync(temporary_file.fileno())
             os.replace(temporary_name, self.path)
-        finally:
+            directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            directory_descriptor = os.open(self.home, directory_flags)
             try:
-                os.unlink(temporary_name)
-            except FileNotFoundError:
-                pass
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+        except OSError as exc:
+            raise MbError(f"unable to write registry: {exc}", 4) from exc
+        finally:
+            if temporary_name is not None:
+                try:
+                    os.unlink(temporary_name)
+                except FileNotFoundError:
+                    pass
 
     def bank_path(self, identity: RepositoryIdentity) -> Path:
         return self.projects_root / identity.project_id / ".memory-bank"
@@ -115,14 +134,16 @@ class RegistryStore:
                 else set()
             )
             known_roots.add(str(identity.root))
-            projects[identity.key] = {
+            raw_entry = {
                 "project_id": identity.project_id,
                 "remote": identity.key if identity.remote else None,
                 "bank_path": str(self.bank_path(identity)),
                 "known_roots": sorted(known_roots),
             }
+            committed_entry = self._entry(raw_entry)
+            projects[identity.key] = raw_entry
             self._write(data)
-        return self.lookup(identity.key)
+        return committed_entry
 
     def lookup(self, key: str) -> RegistryEntry:
         data = self._load(allow_missing=False)
@@ -142,14 +163,16 @@ class RegistryStore:
             old_entry = self._entry(raw_old_entry)
             known_roots = set(old_entry.known_roots)
             known_roots.add(str(identity.root))
-            projects[identity.key] = {
+            raw_entry = {
                 "project_id": old_entry.project_id,
                 "remote": identity.key if identity.remote else None,
                 "bank_path": str(old_entry.bank_path),
                 "known_roots": sorted(known_roots),
             }
+            committed_entry = self._entry(raw_entry)
+            projects[identity.key] = raw_entry
             self._write(data)
-        return self.lookup(identity.key)
+        return committed_entry
 
     def _entry(self, raw_entry: object) -> RegistryEntry:
         if not isinstance(raw_entry, dict) or set(raw_entry) != {
@@ -176,8 +199,11 @@ class RegistryStore:
             or not all(isinstance(root, str) and root != "" for root in known_roots)
         ):
             raise MbError("corrupt registry schema", 4)
+        bank_path = Path(raw_bank_path)
+        if not bank_path.is_absolute():
+            raise MbError("corrupt registry schema", 4)
         try:
-            resolved_bank_path = Path(raw_bank_path).resolve()
+            resolved_bank_path = bank_path.resolve()
             resolved_projects_root = self.projects_root.resolve()
         except (OSError, RuntimeError, ValueError) as exc:
             raise MbError("corrupt registry schema", 4) from exc
