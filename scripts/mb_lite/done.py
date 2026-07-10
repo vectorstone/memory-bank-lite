@@ -268,29 +268,55 @@ def _bank_lock(bank: Path) -> Iterator[None]:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         except OSError as exc:
             raise MbError(f"Bank lock acquisition failed: {exc}", 5) from exc
-        try:
-            yield
-        finally:
-            try:
-                if lock_path.exists() and lock_path.stat().st_size == 0:
-                    lock_path.unlink()
-            except OSError:
-                pass
+        yield
 
 
-def _atomic_write(path: Path, content: str) -> None:
+def _stage_content(path: Path, content: str) -> str:
     descriptor, name = tempfile.mkstemp(
         prefix=f".{path.name}.",
         dir=path.parent,
     )
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
+    return name
+
+
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(content)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _commit_staged_file(path: Path, staged_name: str) -> None:
+    os.replace(staged_name, path)
+    _fsync_directory(path.parent)
+
+
+def _restore_file(path: Path, original: bytes | None) -> None:
+    if original is None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    descriptor, name = tempfile.mkstemp(
+        prefix=f".{path.name}.restore.",
+        dir=path.parent,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(original)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(name, path)
+        _commit_staged_file(path, name)
+        name = ""
     finally:
-        if os.path.exists(name):
+        if name and os.path.exists(name):
             os.unlink(name)
 
 
@@ -307,6 +333,30 @@ def _validate_key_files(repo: Path, values: tuple[str, ...]) -> None:
             candidate.relative_to(root)
         except ValueError as exc:
             raise MbError(f"key file is outside repository: {value}", 1) from exc
+
+
+def _write_all_or_rollback(outputs: tuple[tuple[Path, str], ...]) -> None:
+    originals = {
+        path: path.read_bytes() if path.exists() else None
+        for path, _ in outputs
+    }
+    staged: list[tuple[Path, str]] = []
+    try:
+        for path, content in outputs:
+            staged.append((path, _stage_content(path, content)))
+        applied: list[Path] = []
+        for path, staged_name in staged:
+            _commit_staged_file(path, staged_name)
+            applied.append(path)
+        staged.clear()
+    except OSError as exc:
+        for path in reversed(applied if "applied" in locals() else []):
+            _restore_file(path, originals[path])
+        raise MbError(f"unable to write bank: {exc}", 4) from exc
+    finally:
+        for _, staged_name in staged:
+            if os.path.exists(staged_name):
+                os.unlink(staged_name)
 
 
 def apply_done(bank: Path, repo: Path, payload: DonePayload, now: datetime) -> ApplyResult:
@@ -342,9 +392,12 @@ def apply_done(bank: Path, repo: Path, payload: DonePayload, now: datetime) -> A
                 raise MbError(f"note already exists: {note_relative}", 1)
             note_target.parent.mkdir(parents=True, exist_ok=True)
             note_content = f"# {payload.note.title}\n\n{payload.note.body.rstrip()}\n"
-        _atomic_write(status_path, status)
-        _atomic_write(checklist_path, checklist)
-        _atomic_write(progress_path, progress)
+        outputs = [
+            (status_path, status),
+            (checklist_path, checklist),
+            (progress_path, progress),
+        ]
         if note_target is not None and note_content is not None:
-            _atomic_write(note_target, note_content)
+            outputs.append((note_target, note_content))
+        _write_all_or_rollback(tuple(outputs))
         return ApplyResult(bank_revision(bank), note_relative)

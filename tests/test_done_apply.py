@@ -3,6 +3,7 @@ from pathlib import Path
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from scripts.mb_lite.done import DonePayload, apply_done, bank_revision
 from scripts.mb_lite.errors import MbError
@@ -69,6 +70,7 @@ class DoneApplyTest(unittest.TestCase):
         self.assertTrue((self.bank / "progress.md").read_bytes().startswith(original))
         self.assertEqual(result.note_path, "notes/2026-07-10_central-registry.md")
         self.assertTrue((self.bank / result.note_path).is_file())
+        self.assertTrue((self.bank / ".mb-lite.lock").is_file())
 
     def test_revision_conflict_writes_nothing(self) -> None:
         draft = payload(self.bank)
@@ -77,17 +79,15 @@ class DoneApplyTest(unittest.TestCase):
             encoding="utf-8",
         )
         before = {
-            path.name: path.read_bytes()
-            for path in self.bank.iterdir()
-            if path.is_file()
+            name: (self.bank / name).read_bytes()
+            for name in ("status.md", "checklist.md", "progress.md")
         }
         with self.assertRaisesRegex(MbError, "Bank revision changed") as raised:
             apply_done(self.bank, self.repo, draft, datetime.now(timezone.utc))
         self.assertEqual(raised.exception.exit_code, 3)
         after = {
-            path.name: path.read_bytes()
-            for path in self.bank.iterdir()
-            if path.is_file()
+            name: (self.bank / name).read_bytes()
+            for name in ("status.md", "checklist.md", "progress.md")
         }
         self.assertEqual(before, after)
 
@@ -133,6 +133,32 @@ class DoneApplyTest(unittest.TestCase):
         )
         apply_done(self.bank, self.repo, hostile, datetime.now(timezone.utc))
         self.assertFalse(sentinel.exists())
+
+    def test_failed_later_replace_rolls_back_earlier_files(self) -> None:
+        before = {
+            name: (self.bank / name).read_bytes()
+            for name in ("status.md", "checklist.md", "progress.md")
+        }
+        from scripts.mb_lite import done as done_module
+
+        real_commit = done_module._commit_staged_file
+        calls = {"count": 0}
+
+        def flaky_commit(path: Path, staged_name: str) -> None:
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise OSError("simulated replace failure")
+            real_commit(path, staged_name)
+
+        with patch.object(done_module, "_commit_staged_file", side_effect=flaky_commit):
+            with self.assertRaisesRegex(MbError, "unable to write bank"):
+                apply_done(self.bank, self.repo, payload(self.bank), datetime.now(timezone.utc))
+        after = {
+            name: (self.bank / name).read_bytes()
+            for name in ("status.md", "checklist.md", "progress.md")
+        }
+        self.assertEqual(before, after)
+        self.assertFalse((self.bank / "notes").exists())
 
 
 if __name__ == "__main__":
