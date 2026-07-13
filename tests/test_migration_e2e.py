@@ -195,6 +195,9 @@ class MigrationEndToEndTest(unittest.TestCase):
         nested = unresolved_bank / "notes" / "evidence.bin"
         nested.parent.mkdir()
         nested.write_bytes(b"unresolved-bank-bytes\x00\xff")
+        unrelated_owned = self.home / ".claude/agents/unrelated-owned.md"
+        unrelated_owned.parent.mkdir(parents=True)
+        unrelated_owned.write_text("managed unrelated artifact\n", encoding="utf-8")
         self._write_json(
             self.legacy_registry,
             {
@@ -204,6 +207,19 @@ class MigrationEndToEndTest(unittest.TestCase):
                 },
             },
         )
+        legacy_manifest = self.home / "legacy-install.json"
+        self._write_json(
+            legacy_manifest,
+            {
+                "files": [
+                    str(self.legacy_registry),
+                    str(unresolved_bank / "status.md"),
+                    str(nested),
+                    str(unrelated_owned),
+                ],
+            },
+        )
+        self.env["MB_LEGACY_MANIFEST"] = str(legacy_manifest)
         registry_before = self.legacy_registry.read_bytes()
         unresolved_before = {
             path.relative_to(unresolved_bank): path.read_bytes()
@@ -223,6 +239,22 @@ class MigrationEndToEndTest(unittest.TestCase):
         self.assertIn(str(missing_root), first_dry_run.stdout)
         self.assertIn(str(unresolved_bank), first_dry_run.stdout)
         self.assertIn("registry retained", first_dry_run.stdout)
+        self.assertNotIn(
+            f"remove-owned: {self.legacy_registry.resolve()}",
+            first_dry_run.stdout,
+        )
+        self.assertNotIn(
+            f"remove-owned: {(unresolved_bank / 'status.md').resolve()}",
+            first_dry_run.stdout,
+        )
+        self.assertNotIn(
+            f"remove-owned: {nested.resolve()}",
+            first_dry_run.stdout,
+        )
+        self.assertIn(
+            f"remove-owned: {unrelated_owned.resolve()}",
+            first_dry_run.stdout,
+        )
         self.assertEqual(self._file_bytes(), before)
         self.assertFalse((self.home / ".local/state/mb-migration").exists())
 
@@ -239,6 +271,7 @@ class MigrationEndToEndTest(unittest.TestCase):
         )["projects"]
         self.assertEqual(tuple(projects), ("github.com/example/repo",))
         self.assertEqual(self.legacy_registry.read_bytes(), registry_before)
+        self.assertFalse(unrelated_owned.exists())
         self.assertEqual(
             {
                 path.relative_to(unresolved_bank): path.read_bytes()

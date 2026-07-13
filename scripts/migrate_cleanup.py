@@ -139,16 +139,34 @@ def _shared_paths(root: Path, relatives: tuple[str, ...]) -> frozenset[Path]:
     return frozenset((root / relative).resolve() for relative in relatives)
 
 
+def _is_manifest_protected(
+    path: Path,
+    protected_paths: frozenset[Path],
+    protected_roots: tuple[Path, ...],
+) -> bool:
+    resolved = path.resolve()
+    if resolved in protected_paths:
+        return True
+    for root in protected_roots:
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            continue
+        return True
+    return False
+
+
 def _manifest_actions(
     project: Path,
     manifest: Path,
-    shared_paths: frozenset[Path],
+    protected_paths: frozenset[Path],
+    protected_roots: tuple[Path, ...] = (),
 ) -> list[CleanupAction]:
     data = _load_object(manifest, "adapter manifest")
     actions = [
         CleanupAction("remove-owned", path, f"owned by {manifest}")
         for path in manifest_owned_files(project, manifest)
-        if path.resolve() not in shared_paths
+        if not _is_manifest_protected(path, protected_paths, protected_roots)
     ]
     plugin_ref = data.get("plugin_ref")
     if isinstance(plugin_ref, str) and plugin_ref:
@@ -167,7 +185,11 @@ def _manifest_actions(
         manifest.resolve().relative_to(project.resolve())
     except (OSError, RuntimeError, ValueError):
         manifest_is_owned = False
-    if manifest_is_owned and manifest.resolve() not in shared_paths:
+    if manifest_is_owned and not _is_manifest_protected(
+        manifest,
+        protected_paths,
+        protected_roots,
+    ):
         actions.append(
             CleanupAction(
                 "remove-owned",
@@ -192,6 +214,15 @@ def _legacy_install_manifests(home: Path) -> tuple[Path, ...]:
 def _cleanup_actions(home: Path, plan: MigrationPlan) -> tuple[CleanupAction, ...]:
     actions: list[CleanupAction] = []
     global_shared = _shared_paths(home, GLOBAL_SHARED_FILES)
+    retained_registries = frozenset(
+        path.resolve() for path in plan.retained_legacy_registries
+    )
+    unresolved_banks = tuple(
+        sorted(
+            {record.bank_path.resolve() for record in plan.unresolved_records},
+            key=str,
+        ),
+    )
     for relative in GLOBAL_INSTRUCTIONS:
         path = home / relative
         if path.is_file():
@@ -213,13 +244,32 @@ def _cleanup_actions(home: Path, plan: MigrationPlan) -> tuple[CleanupAction, ..
             manifest = root / relative
             if manifest.is_file():
                 actions.extend(
-                    _manifest_actions(root, manifest, project_shared),
+                    _manifest_actions(
+                        root,
+                        manifest,
+                        project_shared | retained_registries,
+                        unresolved_banks,
+                    ),
                 )
     for manifest in _legacy_install_manifests(home):
-        actions.extend(_manifest_actions(home, manifest, global_shared))
+        actions.extend(
+            _manifest_actions(
+                home,
+                manifest,
+                global_shared | retained_registries,
+                unresolved_banks,
+            ),
+        )
     cursor_manifest = home / ".cursor/.mb-manifest.json"
     if cursor_manifest.is_file():
-        actions.extend(_manifest_actions(home, cursor_manifest, global_shared))
+        actions.extend(
+            _manifest_actions(
+                home,
+                cursor_manifest,
+                global_shared | retained_registries,
+                unresolved_banks,
+            ),
+        )
     deduplicated: dict[tuple[str, str, str | None], CleanupAction] = {}
     for action in actions:
         key = (action.kind, str(action.path), action.plugin_ref)
