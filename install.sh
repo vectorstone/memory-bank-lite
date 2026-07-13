@@ -8,6 +8,11 @@ CLAUDE_SKILL="$HOME/.claude/skills/mb"
 CLAUDE_COMMAND="$HOME/.claude/commands/mb.md"
 SOURCE_COMMAND="$SOURCE/commands/mb.md"
 
+if [[ ! -f "$SOURCE_COMMAND" || ! -r "$SOURCE_COMMAND" ]]; then
+  printf 'Required source artifact is missing or unreadable: %s\n' "$SOURCE_COMMAND" >&2
+  exit 1
+fi
+
 link_resolves_to_source() {
   local path="$1"
   local resolved

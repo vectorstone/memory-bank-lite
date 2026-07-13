@@ -6,7 +6,7 @@ SOURCE="$(cd -- "$SOURCE" && pwd -P)"
 AGENTS_SKILL="$HOME/.agents/skills/mb"
 CLAUDE_SKILL="$HOME/.claude/skills/mb"
 CLAUDE_COMMAND="$HOME/.claude/commands/mb.md"
-OWNERSHIP_DESCRIPTION='description: Explicit Memory Bank Lite action'
+SOURCE_COMMAND="$SOURCE/commands/mb.md"
 
 remove_owned_link() {
   local path="$1"
@@ -23,7 +23,7 @@ remove_owned_link "$CLAUDE_SKILL"
 remove_owned_link "$AGENTS_SKILL"
 
 if [[ -f "$CLAUDE_COMMAND" && ! -L "$CLAUDE_COMMAND" ]] \
-  && grep -Fqx -- "$OWNERSHIP_DESCRIPTION" "$CLAUDE_COMMAND"; then
+  && cmp -s -- "$SOURCE_COMMAND" "$CLAUDE_COMMAND"; then
   rm -- "$CLAUDE_COMMAND"
 fi
 

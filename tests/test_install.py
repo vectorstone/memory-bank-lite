@@ -76,6 +76,33 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(marker.read_text(encoding="utf-8"), "user-owned\n")
         self.assertFalse((self.home / ".claude" / "skills" / "mb").exists())
 
+    def test_install_incomplete_source_writes_nothing_to_home(self) -> None:
+        incomplete_source = self.home / "incomplete-source"
+        incomplete_source.mkdir()
+        self.env["MB_LITE_SOURCE"] = str(incomplete_source)
+
+        result = self._run(INSTALL)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.home / ".agents" / "skills" / "mb").exists())
+        self.assertFalse((self.home / ".claude" / "skills" / "mb").exists())
+        self.assertFalse((self.home / ".claude" / "commands" / "mb.md").exists())
+
+    def test_install_twice_is_idempotent(self) -> None:
+        first = self._run(INSTALL)
+        second = self._run(INSTALL)
+
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(
+            (self.home / ".agents" / "skills" / "mb").resolve(),
+            REPO.resolve(),
+        )
+        self.assertEqual(
+            (self.home / ".claude" / "skills" / "mb").resolve(),
+            REPO.resolve(),
+        )
+
     def test_uninstall_preserves_bank_data_and_removes_only_owned_artifacts(self) -> None:
         installed = self._run(INSTALL)
         self.assertEqual(installed.returncode, 0, installed.stderr)
@@ -127,6 +154,30 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(command.is_symlink())
         self.assertEqual(command.resolve(), user_command.resolve())
+
+    def test_uninstall_preserves_modified_owned_wrapper(self) -> None:
+        installed = self._run(INSTALL)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        command = self.home / ".claude" / "commands" / "mb.md"
+        modified = COMMAND + "User customization\n"
+        command.write_text(modified, encoding="utf-8")
+
+        result = self._run(UNINSTALL)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(command.read_text(encoding="utf-8"), modified)
+
+    def test_uninstall_twice_is_idempotent(self) -> None:
+        installed = self._run(INSTALL)
+        first = self._run(UNINSTALL)
+        second = self._run(UNINSTALL)
+
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertFalse((self.home / ".agents" / "skills" / "mb").exists())
+        self.assertFalse((self.home / ".claude" / "skills" / "mb").exists())
+        self.assertFalse((self.home / ".claude" / "commands" / "mb.md").exists())
 
 
 if __name__ == "__main__":
