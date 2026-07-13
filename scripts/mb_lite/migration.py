@@ -75,6 +75,16 @@ def _records(path: Path) -> list[tuple[Path, object]]:
     return result
 
 
+def _usable_bank_path(raw: object) -> Path | None:
+    if not isinstance(raw, dict):
+        return None
+    value = raw.get("bank_path")
+    if not isinstance(value, str) or not value or "\0" in value:
+        return None
+    path = Path(value)
+    return path if path.is_absolute() else None
+
+
 def plan_migration(home: Path, central_home: Path) -> MigrationPlan:
     grouped: dict[str, tuple[RepositoryIdentity, list[Path], list[Path]]] = {}
     registries = tuple(path for path in legacy_registry_paths(home) if path.exists())
@@ -83,11 +93,7 @@ def plan_migration(home: Path, central_home: Path) -> MigrationPlan:
     for registry in registries:
         registry_is_retained = False
         for root, raw in _records(registry):
-            raw_bank = (
-                Path(raw["bank_path"])
-                if isinstance(raw, dict) and isinstance(raw.get("bank_path"), str)
-                else None
-            )
+            raw_bank = _usable_bank_path(raw)
             if not root.is_dir():
                 unresolved_records.append(
                     UnresolvedLegacyRecord(

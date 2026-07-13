@@ -143,30 +143,31 @@ def _anchored_path(path: Path) -> Path:
     return path.parent.resolve() / path.name
 
 
+def _paths_related(left: Path, right: Path) -> bool:
+    try:
+        left.relative_to(right)
+        return True
+    except ValueError:
+        pass
+    try:
+        right.relative_to(left)
+        return True
+    except ValueError:
+        return False
+
+
 def _is_cleanup_protected(
     path: Path,
     protected_paths: frozenset[Path],
     protected_roots: tuple[Path, ...],
 ) -> bool:
-    anchored = _anchored_path(path)
-    if anchored in protected_paths:
-        return True
-    for root in protected_roots:
-        try:
-            anchored.relative_to(root)
-        except ValueError:
-            continue
-        return True
-    resolved = path.resolve()
-    if resolved in protected_paths:
-        return True
-    for root in protected_roots:
-        try:
-            resolved.relative_to(root)
-        except ValueError:
-            continue
-        return True
-    return False
+    candidates = (_anchored_path(path), path.resolve())
+    protected = (*protected_paths, *protected_roots)
+    return any(
+        _paths_related(candidate, protected_path)
+        for candidate in candidates
+        for protected_path in protected
+    )
 
 
 def _manifest_actions(

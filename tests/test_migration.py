@@ -137,32 +137,38 @@ class MigrationTest(unittest.TestCase):
             missing_root = home / "removed-repo"
             registry = legacy_registry_paths(home)[0]
             registry.parent.mkdir(parents=True)
-            registry.write_text(
-                json.dumps(
-                    {
-                        "projects": {
-                            str(repo): {"bank_path": str(valid_bank)},
-                            str(missing_root): {"bank_path": 7},
-                        },
-                    },
-                ),
-                encoding="utf-8",
-            )
+            for raw_bank in (7, "", "relative/.memory-bank", "/tmp/bank\0path"):
+                with self.subTest(raw_bank=raw_bank):
+                    registry.write_text(
+                        json.dumps(
+                            {
+                                "projects": {
+                                    str(repo): {"bank_path": str(valid_bank)},
+                                    str(missing_root): {"bank_path": raw_bank},
+                                },
+                            },
+                        ),
+                        encoding="utf-8",
+                    )
 
-            plan = plan_migration(home, home / "central")
+                    plan = plan_migration(home, home / "central")
 
-            self.assertEqual(tuple(plan.projects), ("github.com/example/repo",))
-            self.assertEqual(plan.removable_legacy_registries, ())
-            self.assertEqual(plan.retained_legacy_registries, (registry,))
-            self.assertEqual(len(plan.unresolved_records), 1)
-            unresolved = plan.unresolved_records[0]
-            self.assertEqual(unresolved.registry_path, registry)
-            self.assertEqual(unresolved.root, missing_root)
-            self.assertIsNone(unresolved.bank_path)
-            self.assertEqual(
-                unresolved.reason,
-                "legacy project root does not exist; bank_path is unavailable",
-            )
+                    self.assertEqual(
+                        tuple(plan.projects),
+                        ("github.com/example/repo",),
+                    )
+                    self.assertEqual(plan.removable_legacy_registries, ())
+                    self.assertEqual(plan.retained_legacy_registries, (registry,))
+                    self.assertEqual(len(plan.unresolved_records), 1)
+                    unresolved = plan.unresolved_records[0]
+                    self.assertEqual(unresolved.registry_path, registry)
+                    self.assertEqual(unresolved.root, missing_root)
+                    self.assertIsNone(unresolved.bank_path)
+                    self.assertEqual(
+                        unresolved.reason,
+                        "legacy project root does not exist; "
+                        "bank_path is unavailable",
+                    )
 
     def test_existing_root_invalid_bank_remains_corrupt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -175,15 +181,20 @@ class MigrationTest(unittest.TestCase):
             )
             registry = legacy_registry_paths(home)[0]
             registry.parent.mkdir(parents=True)
-            registry.write_text(
-                json.dumps(
-                    {"projects": {str(repo): {"bank_path": 7}}},
-                ),
-                encoding="utf-8",
-            )
+            for raw_bank in (7, "", "relative/.memory-bank", "/tmp/bank\0path"):
+                with self.subTest(raw_bank=raw_bank):
+                    registry.write_text(
+                        json.dumps(
+                            {"projects": {str(repo): {"bank_path": raw_bank}}},
+                        ),
+                        encoding="utf-8",
+                    )
 
-            with self.assertRaisesRegex(MbError, "invalid legacy registry entry"):
-                plan_migration(home, home / "central")
+                    with self.assertRaisesRegex(
+                        MbError,
+                        "invalid legacy registry entry",
+                    ):
+                        plan_migration(home, home / "central")
 
     def test_tree_digest_ignores_lock_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

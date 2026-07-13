@@ -193,8 +193,18 @@ class MigrationEndToEndTest(unittest.TestCase):
         missing_bank_root = self.home / "removed-project-without-bank"
         unresolved_bank_target = self.home / "unresolved-bank-target" / ".memory-bank"
         self._copy_bank(unresolved_bank_target, prefix="unresolved")
-        unresolved_bank = self.home / "unresolved-bank-link" / ".memory-bank"
-        unresolved_bank.parent.mkdir()
+        unresolved_bank_parent_target = self.home / "unresolved-bank-locator-target"
+        unresolved_bank_parent_target.mkdir()
+        unresolved_bank_parent = self.home / "unresolved-bank-link"
+        unresolved_bank_parent.symlink_to(
+            unresolved_bank_parent_target,
+            target_is_directory=True,
+        )
+        unresolved_bank_parent_link_before = unresolved_bank_parent.readlink()
+        unresolved_bank_parent_anchored = (
+            unresolved_bank_parent.parent.resolve() / unresolved_bank_parent.name
+        )
+        unresolved_bank = unresolved_bank_parent / ".memory-bank"
         unresolved_bank.symlink_to(unresolved_bank_target, target_is_directory=True)
         unresolved_bank_anchored = unresolved_bank.parent.resolve() / unresolved_bank.name
         nested = unresolved_bank / "notes" / "evidence.bin"
@@ -255,9 +265,31 @@ class MigrationEndToEndTest(unittest.TestCase):
         opencode_link_before = opencode.readlink()
         unrelated_owned = self.home / "unrelated-owned.md"
         unrelated_owned.write_text("managed unrelated artifact\n", encoding="utf-8")
-        registry_target = self.home / "retained-registry-target.json"
-        registry_target.write_bytes(self.legacy_registry.read_bytes())
+        unrelated_sibling_target = self.home / "unrelated-sibling-target"
+        unrelated_sibling_target.mkdir()
+        (unrelated_sibling_target / "content.bin").write_bytes(b"sibling-target")
+        unrelated_sibling = self.home / ".codex/unrelated-sibling"
+        unrelated_sibling.symlink_to(
+            unrelated_sibling_target,
+            target_is_directory=True,
+        )
+        unrelated_sibling_link_before = unrelated_sibling.readlink()
+        unrelated_sibling_anchored = (
+            unrelated_sibling.parent.resolve() / unrelated_sibling.name
+        )
+        registry_parent = self.legacy_registry.parent
+        registry_source = self.legacy_registry.read_bytes()
         self.legacy_registry.unlink()
+        registry_parent.rmdir()
+        registry_parent_target = self.home / "registry-parent-target"
+        registry_parent_target.mkdir()
+        registry_parent.symlink_to(registry_parent_target, target_is_directory=True)
+        registry_parent_link_before = registry_parent.readlink()
+        registry_parent_anchored = (
+            registry_parent.parent.resolve() / registry_parent.name
+        )
+        registry_target = self.home / "retained-registry-target.json"
+        registry_target.write_bytes(registry_source)
         self.legacy_registry.symlink_to(registry_target)
         registry_link_before = self.legacy_registry.readlink()
         legacy_registry_anchored = (
@@ -278,13 +310,16 @@ class MigrationEndToEndTest(unittest.TestCase):
             legacy_manifest,
             {
                 "files": [
+                    str(registry_parent),
                     str(self.legacy_registry),
                     str(registry_target),
+                    str(unresolved_bank_parent),
                     str(unresolved_bank),
                     str(unresolved_bank / "status.md"),
                     str(nested),
                     str(escaping_link),
                     str(unrelated_owned),
+                    str(unrelated_sibling),
                 ],
                 "plugin_ref": MANAGED_PLUGIN,
             },
@@ -320,11 +355,19 @@ class MigrationEndToEndTest(unittest.TestCase):
             first_dry_run.stdout,
         )
         self.assertNotIn(
+            f"remove-owned: {registry_parent_anchored}",
+            first_dry_run.stdout,
+        )
+        self.assertNotIn(
             f"remove-owned: {self.legacy_registry.resolve()}",
             first_dry_run.stdout,
         )
         self.assertNotIn(
             f"remove-owned: {unresolved_bank_anchored}",
+            first_dry_run.stdout,
+        )
+        self.assertNotIn(
+            f"remove-owned: {unresolved_bank_parent_anchored}",
             first_dry_run.stdout,
         )
         self.assertNotIn(
@@ -350,7 +393,18 @@ class MigrationEndToEndTest(unittest.TestCase):
             f"remove-owned: {unrelated_owned.resolve()}",
             first_dry_run.stdout,
         )
+        self.assertIn(
+            f"remove-owned: {unrelated_sibling_anchored}",
+            first_dry_run.stdout,
+        )
         self.assertEqual(self._file_bytes(), before)
+        self.assertTrue(registry_parent.is_symlink())
+        self.assertEqual(registry_parent.readlink(), registry_parent_link_before)
+        self.assertTrue(unresolved_bank_parent.is_symlink())
+        self.assertEqual(
+            unresolved_bank_parent.readlink(),
+            unresolved_bank_parent_link_before,
+        )
         self.assertTrue(unresolved_bank.is_symlink())
         self.assertEqual(unresolved_bank.readlink(), unresolved_bank_link_before)
         self.assertFalse((self.home / ".local/state/mb-migration").exists())
@@ -372,6 +426,14 @@ class MigrationEndToEndTest(unittest.TestCase):
         self.assertEqual(self.legacy_registry.read_bytes(), registry_before)
         self.assertEqual(registry_target.read_bytes(), registry_target_before)
         self.assertFalse(unrelated_owned.exists())
+        self.assertFalse(unrelated_sibling.exists())
+        self.assertTrue(registry_parent.is_symlink())
+        self.assertEqual(registry_parent.readlink(), registry_parent_link_before)
+        self.assertTrue(unresolved_bank_parent.is_symlink())
+        self.assertEqual(
+            unresolved_bank_parent.readlink(),
+            unresolved_bank_parent_link_before,
+        )
         self.assertTrue(unresolved_bank.is_symlink())
         self.assertEqual(unresolved_bank.readlink(), unresolved_bank_link_before)
         self.assertTrue(escaping_link.is_symlink())
@@ -397,6 +459,15 @@ class MigrationEndToEndTest(unittest.TestCase):
         self.assertEqual(self.legacy_registry.readlink(), registry_link_before)
         self.assertEqual(self.legacy_registry.read_bytes(), registry_before)
         self.assertEqual(registry_target.read_bytes(), registry_target_before)
+        self.assertTrue(unrelated_sibling.is_symlink())
+        self.assertEqual(unrelated_sibling.readlink(), unrelated_sibling_link_before)
+        self.assertTrue(registry_parent.is_symlink())
+        self.assertEqual(registry_parent.readlink(), registry_parent_link_before)
+        self.assertTrue(unresolved_bank_parent.is_symlink())
+        self.assertEqual(
+            unresolved_bank_parent.readlink(),
+            unresolved_bank_parent_link_before,
+        )
         self.assertTrue(unresolved_bank.is_symlink())
         self.assertEqual(unresolved_bank.readlink(), unresolved_bank_link_before)
         self.assertTrue(escaping_link.is_symlink())
