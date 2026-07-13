@@ -227,6 +227,16 @@ class RegistryStore:
             self._write(data)
         return committed_entry
 
+    def replace_projects(self, projects: dict[str, object]) -> None:
+        with self.locked():
+            data = self._load(allow_missing=True)
+            data["version"] = 1
+            data["projects_root"] = str(self.projects_root)
+            data["projects"] = projects
+            for raw_entry in projects.values():
+                self._entry(raw_entry)
+            self._write(data)
+
     def lookup(self, key: str) -> RegistryEntry:
         data = self._load(allow_missing=False)
         projects = cast(dict[str, object], data["projects"])
