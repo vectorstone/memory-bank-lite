@@ -284,25 +284,39 @@ class MigrationEndToEndTest(unittest.TestCase):
             observed_resolved,
         )
 
-    def test_legacy_manifest_cannot_remove_shared_rules_or_hooks(self) -> None:
+    def test_legacy_manifest_protects_exact_shared_paths_only(self) -> None:
         rules = self.home / ".claude/RULES.md"
         hooks = self.home / ".claude/hooks.json"
+        owned_agent = self.home / ".claude/agents/mb-rules-enforcer.md"
         rules.parent.mkdir(parents=True, exist_ok=True)
+        owned_agent.parent.mkdir(parents=True, exist_ok=True)
         rules.write_text("user rules\n", encoding="utf-8")
         hooks.write_text('{"user": true}\n', encoding="utf-8")
+        owned_agent.write_text("managed agent\n", encoding="utf-8")
         legacy_manifest = self.home / "legacy-install.json"
         self._write_json(
             legacy_manifest,
-            {"files": [str(rules), str(hooks), str(self.global_agents)]},
+            {
+                "files": [
+                    str(rules),
+                    str(hooks),
+                    str(self.global_agents),
+                    str(owned_agent),
+                ],
+            },
         )
         self.env["MB_LEGACY_MANIFEST"] = str(legacy_manifest)
 
+        dry_run = self._run()
         result = self._run("--apply", "--timestamp", "protect-shared")
 
+        self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
+        self.assertIn(f"remove-owned: {owned_agent.resolve()}", dry_run.stdout)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(rules.read_text(encoding="utf-8"), "user rules\n")
         self.assertEqual(hooks.read_text(encoding="utf-8"), '{"user": true}\n')
         self.assertEqual(self.global_agents.read_text(encoding="utf-8"), "user-global\n")
+        self.assertFalse(owned_agent.exists())
 
     def test_invalid_cli_combination_uses_mb_error_exit_one(self) -> None:
         result = self._run("--apply", "--rollback", "migration-e2e")

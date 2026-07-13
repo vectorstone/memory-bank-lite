@@ -31,6 +31,51 @@ GLOBAL_INSTRUCTIONS = (
     ".cursor/AGENTS.md",
     ".pi/agent/AGENTS.md",
 )
+GLOBAL_SHARED_FILES = GLOBAL_INSTRUCTIONS + (
+    ".codex/RULES.md",
+    ".codex/hooks.json",
+    ".codex/settings.json",
+    ".claude/AGENTS.md",
+    ".claude/RULES.md",
+    ".claude/hooks.json",
+    ".claude/settings.json",
+    ".config/opencode/RULES.md",
+    ".config/opencode/hooks.json",
+    ".config/opencode/opencode.json",
+    ".config/opencode/settings.json",
+    ".cursor/RULES.md",
+    ".cursor/hooks.json",
+    ".cursor/settings.json",
+    ".pi/agent/RULES.md",
+    ".pi/agent/hooks.json",
+    ".pi/agent/settings.json",
+)
+PROJECT_SHARED_FILES = (
+    "AGENTS.md",
+    "CLAUDE.md",
+    "RULES.md",
+    "opencode.json",
+    ".codex/AGENTS.md",
+    ".codex/RULES.md",
+    ".codex/hooks.json",
+    ".codex/settings.json",
+    ".claude/CLAUDE.md",
+    ".claude/RULES.md",
+    ".claude/hooks.json",
+    ".claude/settings.json",
+    ".opencode/AGENTS.md",
+    ".opencode/RULES.md",
+    ".opencode/hooks.json",
+    ".opencode/settings.json",
+    ".cursor/AGENTS.md",
+    ".cursor/RULES.md",
+    ".cursor/hooks.json",
+    ".cursor/settings.json",
+    ".pi/agent/AGENTS.md",
+    ".pi/agent/RULES.md",
+    ".pi/agent/hooks.json",
+    ".pi/agent/settings.json",
+)
 PROJECT_MANIFESTS = (
     ".codex/.mb-manifest.json",
     ".opencode/.mb-manifest.json",
@@ -88,31 +133,20 @@ def _load_object(path: Path, label: str) -> dict[str, Any]:
     return value
 
 
-def _is_shared_path(path: Path) -> bool:
-    name = path.name.lower()
-    return (
-        name in {
-            "agents.md",
-            "claude.md",
-            "hooks.json",
-            "opencode.json",
-            "settings.json",
-        }
-        or "instructions" in name
-        or "prompt" in name
-        or "rules" in name
-    )
+def _shared_paths(root: Path, relatives: tuple[str, ...]) -> frozenset[Path]:
+    return frozenset((root / relative).resolve() for relative in relatives)
 
 
 def _manifest_actions(
     project: Path,
     manifest: Path,
+    shared_paths: frozenset[Path],
 ) -> list[CleanupAction]:
     data = _load_object(manifest, "adapter manifest")
     actions = [
         CleanupAction("remove-owned", path, f"owned by {manifest}")
         for path in manifest_owned_files(project, manifest)
-        if not _is_shared_path(path)
+        if path.resolve() not in shared_paths
     ]
     plugin_ref = data.get("plugin_ref")
     if isinstance(plugin_ref, str) and plugin_ref:
@@ -131,7 +165,7 @@ def _manifest_actions(
         manifest.resolve().relative_to(project.resolve())
     except (OSError, RuntimeError, ValueError):
         manifest_is_owned = False
-    if manifest_is_owned:
+    if manifest_is_owned and manifest.resolve() not in shared_paths:
         actions.append(
             CleanupAction(
                 "remove-owned",
@@ -155,6 +189,7 @@ def _legacy_install_manifests(home: Path) -> tuple[Path, ...]:
 
 def _cleanup_actions(home: Path, plan: MigrationPlan) -> tuple[CleanupAction, ...]:
     actions: list[CleanupAction] = []
+    global_shared = _shared_paths(home, GLOBAL_SHARED_FILES)
     for relative in GLOBAL_INSTRUCTIONS:
         path = home / relative
         if path.is_file():
@@ -168,18 +203,21 @@ def _cleanup_actions(home: Path, plan: MigrationPlan) -> tuple[CleanupAction, ..
         {root for project in plan.projects.values() for root in project.known_roots},
     )
     for root in roots:
+        project_shared = _shared_paths(root, PROJECT_SHARED_FILES)
         agents = root / "AGENTS.md"
         if agents.is_file():
             actions.append(CleanupAction("strip-blocks", agents, "managed prompt block"))
         for relative in PROJECT_MANIFESTS:
             manifest = root / relative
             if manifest.is_file():
-                actions.extend(_manifest_actions(root, manifest))
+                actions.extend(
+                    _manifest_actions(root, manifest, project_shared),
+                )
     for manifest in _legacy_install_manifests(home):
-        actions.extend(_manifest_actions(home, manifest))
+        actions.extend(_manifest_actions(home, manifest, global_shared))
     cursor_manifest = home / ".cursor/.mb-manifest.json"
     if cursor_manifest.is_file():
-        actions.extend(_manifest_actions(home, cursor_manifest))
+        actions.extend(_manifest_actions(home, cursor_manifest, global_shared))
     deduplicated: dict[tuple[str, str, str | None], CleanupAction] = {}
     for action in actions:
         key = (action.kind, str(action.path), action.plugin_ref)
