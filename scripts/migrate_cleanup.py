@@ -727,16 +727,27 @@ def _prepare_mutations(
     registry_path: Path,
 ) -> tuple[PreparedMutation, ...]:
     grouped: dict[str, list[CleanupAction]] = {}
+    resolved_registry = registry_path.resolve()
     for action in actions:
-        if action.path.resolve() == registry_path.resolve():
+        resolved_action = action.path.resolve()
+        if resolved_action == resolved_registry:
             continue
-        grouped.setdefault(str(action.path.resolve()), []).append(action)
+        group_path = (
+            _anchored_path(action.path)
+            if action.path.is_symlink()
+            else resolved_action
+        )
+        grouped.setdefault(str(group_path), []).append(action)
     prepared: list[PreparedMutation] = []
-    for resolved_path in sorted(
+    for group_path in sorted(
         grouped,
-        key=lambda value: (-len(Path(value).parts), value),
+        key=lambda value: (
+            -len(grouped[value][0].path.resolve().parts),
+            str(grouped[value][0].path.resolve()),
+            value,
+        ),
     ):
-        path_actions = grouped[resolved_path]
+        path_actions = grouped[group_path]
         path = path_actions[0].path
         kinds = {action.kind for action in path_actions}
         detail = ", ".join(sorted({action.detail for action in path_actions}))

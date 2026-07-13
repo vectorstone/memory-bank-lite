@@ -634,8 +634,12 @@ class MigrationEndToEndTest(unittest.TestCase):
         link = self.home / ".claude/skills/memory-bank"
         link.parent.mkdir(parents=True)
         link.symlink_to(source, target_is_directory=True)
+        second_link = self.home / ".codex/skills/memory-bank"
+        second_link.parent.mkdir(parents=True)
+        second_link.symlink_to(source, target_is_directory=True)
         actions = (
             CleanupAction("remove-owned", link, "owned skill link"),
+            CleanupAction("remove-owned", second_link, "owned codex skill link"),
             CleanupAction(
                 "remove-owned",
                 link / ".installed-manifest.json",
@@ -647,7 +651,7 @@ class MigrationEndToEndTest(unittest.TestCase):
 
         self.assertEqual(
             [mutation.path for mutation in mutations],
-            [link / ".installed-manifest.json", link],
+            [link / ".installed-manifest.json", link, second_link],
         )
 
     def test_bank_final_placement_symlink_race_cannot_write_outside(self) -> None:
