@@ -188,6 +188,83 @@ class MigrationEndToEndTest(unittest.TestCase):
         for path, content in before.items():
             self.assertEqual(Path(path).read_bytes(), content, path)
 
+    def test_mixed_registry_migrates_valid_record_and_retains_unresolved_record(self) -> None:
+        missing_root = self.home / "removed-project"
+        unresolved_bank = self.home / "unresolved-bank" / ".memory-bank"
+        self._copy_bank(unresolved_bank, prefix="unresolved")
+        nested = unresolved_bank / "notes" / "evidence.bin"
+        nested.parent.mkdir()
+        nested.write_bytes(b"unresolved-bank-bytes\x00\xff")
+        self._write_json(
+            self.legacy_registry,
+            {
+                "projects": {
+                    str(self.repo): {"bank_path": str(self.bank)},
+                    str(missing_root): {"bank_path": str(unresolved_bank)},
+                },
+            },
+        )
+        registry_before = self.legacy_registry.read_bytes()
+        unresolved_before = {
+            path.relative_to(unresolved_bank): path.read_bytes()
+            for path in unresolved_bank.rglob("*")
+            if path.is_file()
+        }
+        before = self._file_bytes()
+
+        first_dry_run = self._run()
+        second_dry_run = self._run()
+
+        self.assertEqual(first_dry_run.returncode, 0, first_dry_run.stderr)
+        self.assertEqual(second_dry_run.returncode, 0, second_dry_run.stderr)
+        self.assertEqual(first_dry_run.stdout, second_dry_run.stdout)
+        self.assertIn("Unresolved legacy records", first_dry_run.stdout)
+        self.assertIn(str(self.legacy_registry), first_dry_run.stdout)
+        self.assertIn(str(missing_root), first_dry_run.stdout)
+        self.assertIn(str(unresolved_bank), first_dry_run.stdout)
+        self.assertIn("registry retained", first_dry_run.stdout)
+        self.assertEqual(self._file_bytes(), before)
+        self.assertFalse((self.home / ".local/state/mb-migration").exists())
+
+        applied = self._run("--apply", "--timestamp", "mixed-registry")
+
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        target_bank = self._target_bank()
+        self.assertEqual(
+            (target_bank / "status.md").read_bytes(),
+            (self.bank / "status.md").read_bytes(),
+        )
+        projects = json.loads(
+            (self.central / "registry.json").read_text(encoding="utf-8"),
+        )["projects"]
+        self.assertEqual(tuple(projects), ("github.com/example/repo",))
+        self.assertEqual(self.legacy_registry.read_bytes(), registry_before)
+        self.assertEqual(
+            {
+                path.relative_to(unresolved_bank): path.read_bytes()
+                for path in unresolved_bank.rglob("*")
+                if path.is_file()
+            },
+            unresolved_before,
+        )
+
+        rolled_back = self._run("--rollback", "mixed-registry")
+
+        self.assertEqual(rolled_back.returncode, 0, rolled_back.stderr)
+        self.assertFalse((self.central / "registry.json").exists())
+        self.assertTrue(target_bank.is_dir())
+        self.assertEqual(self.legacy_registry.read_bytes(), registry_before)
+        self.assertEqual(
+            {
+                path.relative_to(unresolved_bank): path.read_bytes()
+                for path in unresolved_bank.rglob("*")
+                if path.is_file()
+            },
+            unresolved_before,
+        )
+        for path, content in before.items():
+            self.assertEqual(Path(path).read_bytes(), content, path)
+
     def test_apply_unions_existing_roots_and_preserves_unrelated_projects(self) -> None:
         target_bank = self._target_bank()
         self._copy_bank(target_bank)

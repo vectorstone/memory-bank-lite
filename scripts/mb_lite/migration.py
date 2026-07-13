@@ -17,9 +17,24 @@ class PlannedProject:
 
 
 @dataclass(frozen=True)
+class UnresolvedLegacyRecord:
+    registry_path: Path
+    root: Path
+    bank_path: Path
+    reason: str
+
+
+@dataclass(frozen=True)
 class MigrationPlan:
     projects: dict[str, PlannedProject]
     legacy_registries: tuple[Path, ...]
+    retained_legacy_registries: tuple[Path, ...] = ()
+    unresolved_records: tuple[UnresolvedLegacyRecord, ...] = ()
+
+    @property
+    def removable_legacy_registries(self) -> tuple[Path, ...]:
+        retained = frozenset(self.retained_legacy_registries)
+        return tuple(path for path in self.legacy_registries if path not in retained)
 
 
 def legacy_registry_paths(home: Path) -> tuple[Path, ...]:
@@ -65,10 +80,22 @@ def _records(path: Path) -> list[tuple[Path, Path]]:
 def plan_migration(home: Path, central_home: Path) -> MigrationPlan:
     grouped: dict[str, tuple[RepositoryIdentity, list[Path], list[Path]]] = {}
     registries = tuple(path for path in legacy_registry_paths(home) if path.exists())
+    retained_registries: list[Path] = []
+    unresolved_records: list[UnresolvedLegacyRecord] = []
     for registry in registries:
+        registry_is_retained = False
         for root, raw_bank in _records(registry):
             if not root.is_dir():
-                raise MbError(f"legacy project root does not exist: {root}", 4)
+                unresolved_records.append(
+                    UnresolvedLegacyRecord(
+                        registry,
+                        root,
+                        raw_bank,
+                        "legacy project root does not exist",
+                    ),
+                )
+                registry_is_retained = True
+                continue
             identity = resolve_identity(root)
             bank = validate_bank(raw_bank.resolve())
             current = grouped.setdefault(identity.key, (identity, [], []))
@@ -76,6 +103,8 @@ def plan_migration(home: Path, central_home: Path) -> MigrationPlan:
                 current[1].append(bank)
             if identity.root not in current[2]:
                 current[2].append(identity.root)
+        if registry_is_retained:
+            retained_registries.append(registry)
     planned: dict[str, PlannedProject] = {}
     for key, (identity, banks, roots) in grouped.items():
         digests = {tree_digest(bank) for bank in banks}
@@ -91,4 +120,9 @@ def plan_migration(home: Path, central_home: Path) -> MigrationPlan:
             target,
             tuple(sorted(roots)),
         )
-    return MigrationPlan(planned, registries)
+    return MigrationPlan(
+        planned,
+        registries,
+        tuple(retained_registries),
+        tuple(unresolved_records),
+    )

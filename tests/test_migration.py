@@ -55,6 +55,60 @@ class MigrationTest(unittest.TestCase):
             with self.assertRaisesRegex(MbError, "different Bank content"):
                 plan_migration(root, root / "central")
 
+    def test_missing_root_is_unresolved_and_retains_mixed_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            repo = home / "repo"
+            subprocess.run(
+                ["git", "init", "-b", "main", str(repo)],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "remote",
+                    "add",
+                    "origin",
+                    "git@github.com:example/repo.git",
+                ],
+                check=True,
+            )
+            valid_bank = home / "valid-bank" / ".memory-bank"
+            missing_root = home / "removed-repo"
+            unresolved_bank = home / "unresolved-bank" / ".memory-bank"
+            for bank in (valid_bank, unresolved_bank):
+                bank.mkdir(parents=True)
+                for name in ("status.md", "checklist.md", "progress.md"):
+                    (bank / name).write_text(f"# {name}\n", encoding="utf-8")
+            registry = legacy_registry_paths(home)[0]
+            registry.parent.mkdir(parents=True)
+            registry.write_text(
+                json.dumps(
+                    {
+                        "projects": {
+                            str(repo): {"bank_path": str(valid_bank)},
+                            str(missing_root): {"bank_path": str(unresolved_bank)},
+                        },
+                    },
+                ),
+                encoding="utf-8",
+            )
+
+            plan = plan_migration(home, home / "central")
+
+            self.assertEqual(tuple(plan.projects), ("github.com/example/repo",))
+            self.assertEqual(plan.removable_legacy_registries, ())
+            self.assertEqual(plan.retained_legacy_registries, (registry,))
+            self.assertEqual(len(plan.unresolved_records), 1)
+            unresolved = plan.unresolved_records[0]
+            self.assertEqual(unresolved.registry_path, registry)
+            self.assertEqual(unresolved.root, missing_root)
+            self.assertEqual(unresolved.bank_path, unresolved_bank)
+            self.assertEqual(unresolved.reason, "legacy project root does not exist")
+
     def test_tree_digest_ignores_lock_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             bank = Path(directory) / ".memory-bank"

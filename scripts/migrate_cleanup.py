@@ -199,7 +199,7 @@ def _cleanup_actions(home: Path, plan: MigrationPlan) -> tuple[CleanupAction, ..
     claude_settings = home / ".claude/settings.json"
     if claude_settings.is_file():
         actions.append(CleanupAction("clean-hooks", claude_settings, "managed hooks"))
-    for registry in plan.legacy_registries:
+    for registry in plan.removable_legacy_registries:
         actions.append(CleanupAction("remove-owned", registry, "legacy registry"))
     roots = sorted(
         {root for project in plan.projects.values() for root in project.known_roots},
@@ -246,6 +246,23 @@ def _render_plan(
         f"{action.kind}: {action.path} ({action.detail})"
         for action in actions
     )
+    if plan.unresolved_records:
+        lines.append("Unresolved legacy records:")
+        for record in sorted(
+            plan.unresolved_records,
+            key=lambda value: (
+                str(value.registry_path),
+                str(value.root),
+                str(value.bank_path),
+            ),
+        ):
+            lines.append(
+                "unresolved-record: "
+                f"registry={record.registry_path}; "
+                f"root={record.root}; "
+                f"bank={record.bank_path}; "
+                f"reason={record.reason}; registry retained",
+            )
     return "\n".join(lines)
 
 
