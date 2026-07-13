@@ -3,9 +3,12 @@
 ## 1. Baseline
 
 Capture file content, type, mode, and symlink targets before and after the
-dry-run. The snapshot intentionally excludes only `onduty/.git`; it includes
-tracked and untracked working-tree content. Run the block in one shell so the
-snapshot function is available for both captures:
+dry-run. It also discovers existing project roots from legacy registries and
+the Git repositories behind known legacy skill symlinks. The snapshot excludes
+only `.git` inside project/source roots; it includes tracked and untracked
+working-tree content and records, but does not recursively follow, other
+symlinks. Run the block in one shell so the snapshot function is available for
+both captures:
 
 ```bash
 mb_lite_snapshot() {
@@ -17,7 +20,20 @@ from pathlib import Path
 import stat
 
 home = Path.home()
-roots = (
+legacy_registries = (
+    home / ".codex/memory-bank/registry.json",
+    home / ".claude/memory-bank/registry.json",
+    home / ".config/opencode/memory-bank/registry.json",
+)
+legacy_skills = (
+    home / ".claude/skills/skill-memory-bank",
+    home / ".claude/skills/memory-bank",
+    home / ".codex/skills/memory-bank",
+    home / ".config/opencode/skills/memory-bank",
+    home / ".cursor/skills/memory-bank",
+    home / ".pi/agent/skills/memory-bank",
+)
+roots = [
     ("codex-config", home / ".codex/AGENTS.md", False),
     ("codex-rules", home / ".codex/RULES.md", False),
     ("codex-hooks", home / ".codex/hooks.json", False),
@@ -58,7 +74,53 @@ roots = (
         False,
     ),
     ("onduty", Path("/Users/wangxiaoguang/IdeaProjects/onduty"), True),
-)
+]
+
+
+def git_root(path: Path) -> Path:
+    for candidate in (path, *path.parents):
+        marker = candidate / ".git"
+        if marker.exists() or marker.is_symlink():
+            return candidate
+    return path
+
+
+discovered: dict[tuple[str, str], Path] = {}
+for registry in legacy_registries:
+    try:
+        data = json.loads(registry.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        continue
+    projects = data.get("projects", {}) if isinstance(data, dict) else {}
+    if not isinstance(projects, dict):
+        continue
+    for raw_root in projects:
+        if not isinstance(raw_root, str) or not raw_root:
+            continue
+        try:
+            project = Path(raw_root).expanduser()
+            if not project.is_absolute() or not project.is_dir():
+                continue
+            project = project.resolve()
+        except (OSError, RuntimeError, ValueError):
+            continue
+        discovered[("legacy-project", str(project))] = project
+
+for skill in legacy_skills:
+    if not skill.is_symlink():
+        continue
+    try:
+        target = skill.resolve(strict=True)
+        if not target.is_dir():
+            continue
+        source = git_root(target)
+    except (OSError, RuntimeError):
+        continue
+    discovered[("legacy-skill-source", str(source))] = source
+
+for (kind, raw_path), path in sorted(discovered.items()):
+    suffix = hashlib.sha256(raw_path.encode("utf-8")).hexdigest()[:12]
+    roots.append((f"{kind}-{suffix}", path, True))
 
 
 def emit(label: str, relative: str, kind: str, mode: int, value: str) -> None:
@@ -103,6 +165,7 @@ def visit(label: str, root: Path, path: Path, exclude_git: bool) -> None:
 
 
 for label, root, exclude_git in roots:
+    emit(label, "@root", "root", 0, str(root))
     visit(label, root, root, exclude_git)
 PY
 }
