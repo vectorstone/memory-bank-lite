@@ -8,11 +8,169 @@ import tempfile
 from .errors import MbError
 
 
+@dataclass(frozen=True)
+class RollbackRecord:
+    path: Path
+    kind: str
+    content: bytes | None = None
+    target: str | None = None
+
+
 def _unlink_if_present(path: str) -> None:
     try:
         os.unlink(path)
     except FileNotFoundError:
         return
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _atomic_write(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".rollback",
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as temporary:
+            temporary.write(content)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_name, path)
+        _fsync_directory(path.parent)
+    finally:
+        _unlink_if_present(temporary_name)
+
+
+def _atomic_symlink(path: Path, target: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".rollback",
+    )
+    os.close(descriptor)
+    _unlink_if_present(temporary_name)
+    try:
+        os.symlink(target, temporary_name)
+        os.replace(temporary_name, path)
+        _fsync_directory(path.parent)
+    finally:
+        _unlink_if_present(temporary_name)
+
+
+def _valid_digest(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _record_path(value: object) -> Path:
+    if not isinstance(value, str) or not value or "\0" in value:
+        raise ValueError("invalid record path")
+    path = Path(value)
+    if not path.is_absolute():
+        raise ValueError("record path must be absolute")
+    return path
+
+
+def _backup_content(directory: Path, record: dict[str, object]) -> bytes:
+    raw_backup = record.get("backup")
+    if (
+        not isinstance(raw_backup, str)
+        or not raw_backup
+        or "\0" in raw_backup
+        or Path(raw_backup).name != raw_backup
+        or raw_backup in {".", ".."}
+    ):
+        raise ValueError("invalid backup path")
+    backup = directory / raw_backup
+    if backup.is_symlink() or not backup.is_file():
+        raise ValueError("invalid backup file")
+    resolved_directory = directory.resolve()
+    resolved_backup = backup.resolve()
+    resolved_backup.relative_to(resolved_directory)
+    content = backup.read_bytes()
+    if not _valid_digest(record.get("sha256")):
+        raise ValueError("invalid backup checksum")
+    if sha256(content).hexdigest() != record["sha256"]:
+        raise ValueError("backup checksum mismatch")
+    return content
+
+
+def _validated_records(directory: Path) -> tuple[RollbackRecord, ...]:
+    manifest = directory / "manifest.json"
+    if manifest.is_symlink() or not manifest.is_file():
+        raise ValueError("invalid manifest file")
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    if (
+        not isinstance(data, dict)
+        or set(data) != {"version", "records"}
+        or data.get("version") != 1
+        or type(data.get("version")) is not int
+        or not isinstance(data.get("records"), list)
+    ):
+        raise ValueError("invalid manifest schema")
+    result: list[RollbackRecord] = []
+    seen_paths: set[Path] = set()
+    for raw_record in data["records"]:
+        if not isinstance(raw_record, dict):
+            raise ValueError("invalid rollback record")
+        kind = raw_record.get("kind")
+        path = _record_path(raw_record.get("path"))
+        action = raw_record.get("action")
+        if not isinstance(action, str) or not action:
+            raise ValueError("invalid rollback action")
+        if path in seen_paths:
+            raise ValueError("duplicate rollback path")
+        seen_paths.add(path)
+        if kind == "file":
+            if set(raw_record) != {"path", "backup", "sha256", "action", "kind"}:
+                raise ValueError("invalid file rollback record")
+            result.append(
+                RollbackRecord(path, kind, content=_backup_content(directory, raw_record)),
+            )
+        elif kind == "symlink":
+            if set(raw_record) != {
+                "path",
+                "backup",
+                "sha256",
+                "target",
+                "action",
+                "kind",
+            }:
+                raise ValueError("invalid symlink rollback record")
+            target = raw_record.get("target")
+            if (
+                raw_record.get("backup") is not None
+                or not isinstance(target, str)
+                or not target
+                or "\0" in target
+                or not _valid_digest(raw_record.get("sha256"))
+                or sha256(target.encode("utf-8")).hexdigest() != raw_record["sha256"]
+            ):
+                raise ValueError("invalid symlink rollback record")
+            result.append(RollbackRecord(path, kind, target=target))
+        elif kind == "missing":
+            if (
+                set(raw_record) != {"path", "backup", "sha256", "action", "kind"}
+                or raw_record.get("backup") is not None
+                or raw_record.get("sha256") is not None
+            ):
+                raise ValueError("invalid missing rollback record")
+            result.append(RollbackRecord(path, kind))
+        else:
+            raise ValueError("unknown rollback kind")
+    return tuple(result)
 
 
 @dataclass
@@ -24,6 +182,7 @@ class BackupTransaction:
     def create(cls, state_root: Path, timestamp: str) -> "BackupTransaction":
         directory = state_root / timestamp
         directory.mkdir(parents=True, exist_ok=False)
+        _fsync_directory(state_root)
         return cls(directory)
 
     def capture(self, path: Path, action: str) -> None:
@@ -73,51 +232,32 @@ class BackupTransaction:
             {"version": 1, "records": self.records},
             ensure_ascii=False,
             indent=2,
-        ) + "\n"
-        descriptor, temporary_name = tempfile.mkstemp(
-            dir=self.directory,
-            prefix=".manifest.",
-            suffix=".tmp",
-        )
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as temporary:
-                temporary.write(content)
-                temporary.flush()
-                os.fsync(temporary.fileno())
-            os.replace(temporary_name, self.directory / "manifest.json")
-            directory = os.open(
-                self.directory,
-                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-            )
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-        finally:
-            _unlink_if_present(temporary_name)
+        ).encode("utf-8") + b"\n"
+        _atomic_write(self.directory / "manifest.json", content)
 
     @staticmethod
     def rollback(directory: Path) -> None:
         try:
-            data = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            records = _validated_records(directory)
+        except (
+            KeyError,
+            OSError,
+            UnicodeError,
+            ValueError,
+            TypeError,
+            json.JSONDecodeError,
+        ) as exc:
             raise MbError(f"invalid rollback manifest: {directory}", 4) from exc
-        for record in reversed(data["records"]):
-            path = Path(record["path"])
-            if record["kind"] == "file":
-                backup = directory / record["backup"]
-                content = backup.read_bytes()
-                if sha256(content).hexdigest() != record["sha256"]:
-                    raise MbError(f"backup checksum mismatch: {backup}", 4)
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(content)
-            elif record["kind"] == "symlink":
-                target = str(record["target"])
-                if sha256(target.encode("utf-8")).hexdigest() != record["sha256"]:
-                    raise MbError(f"backup checksum mismatch: symlink {path}", 4)
-                if path.is_symlink() or path.is_file():
-                    path.unlink()
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.symlink_to(target)
-            elif record["kind"] == "missing" and (path.is_symlink() or path.is_file()):
-                path.unlink()
+        try:
+            for record in reversed(records):
+                if record.kind == "file":
+                    _atomic_write(record.path, record.content or b"")
+                elif record.kind == "symlink":
+                    _atomic_symlink(record.path, record.target or "")
+                elif record.path.is_symlink() or record.path.is_file():
+                    record.path.unlink()
+                    _fsync_directory(record.path.parent)
+                elif record.path.exists():
+                    raise OSError(f"rollback path is not a file: {record.path}")
+        except (OSError, ValueError) as exc:
+            raise MbError(f"unable to restore rollback manifest: {directory}", 4) from exc

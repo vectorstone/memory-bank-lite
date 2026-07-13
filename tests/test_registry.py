@@ -629,6 +629,39 @@ class RegistryTest(unittest.TestCase):
                 finally:
                     queue.join_thread()
 
+    def test_replace_projects_rejects_stale_snapshot_without_losing_update(self) -> None:
+        self.store.replace_projects({})
+        expected = dict(self.store._load(allow_missing=False)["projects"])
+        self.store.register(self.identity)
+        replacement_identity = RepositoryIdentity(
+            root=Path("/tmp/replacement"),
+            key="github.com/example/replacement",
+            slug="replacement",
+            digest="abcdef123456",
+            project_id="replacement-abcdef123456",
+            remote="git@github.com:example/replacement.git",
+        )
+        replacement = {
+            replacement_identity.key: {
+                "project_id": replacement_identity.project_id,
+                "remote": replacement_identity.key,
+                "bank_path": str(self.store.bank_path(replacement_identity)),
+                "known_roots": [str(replacement_identity.root)],
+            },
+        }
+
+        with self.assertRaisesRegex(MbError, "registry changed") as raised:
+            self.store.replace_projects(
+                replacement,
+                expected_projects=expected,
+            )
+
+        self.assertEqual(raised.exception.exit_code, 3)
+        self.assertEqual(
+            self.store.lookup(self.identity.key).known_roots,
+            ("/tmp/onduty",),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

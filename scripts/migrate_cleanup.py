@@ -280,27 +280,105 @@ def _unlink_if_present(path: Path) -> None:
         return
 
 
+def _validate_bank_target(target: Path) -> None:
+    projects_root = target.parent.parent
+    try:
+        resolved_root = projects_root.resolve()
+        resolved_parent = target.parent.resolve()
+        relative_parent = resolved_parent.relative_to(resolved_root)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise MbError(f"target Bank escapes projects_root: {target}", 4) from exc
+    if (
+        target.name != ".memory-bank"
+        or projects_root.is_symlink()
+        or target.parent.is_symlink()
+        or len(relative_parent.parts) != 1
+    ):
+        raise MbError(f"target Bank escapes projects_root: {target}", 4)
+
+
+def _fsync_path(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_tree(root: Path) -> None:
+    directories = [root]
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            continue
+        if path.is_dir():
+            directories.append(path)
+            continue
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    for directory in reversed(directories):
+        _fsync_path(directory)
+
+
+def _remove_bank_temporary(temporary: Path) -> None:
+    try:
+        shutil.rmtree(temporary)
+        _fsync_path(temporary.parent)
+    except OSError as exc:
+        raise MbError(
+            f"unable to clean temporary Bank: {temporary}: {exc}",
+            4,
+        ) from exc
+
+
 def _copy_banks(plan: MigrationPlan) -> None:
     for key in sorted(plan.projects):
         project = plan.projects[key]
         target = project.target_bank
+        _validate_bank_target(target)
         if target.exists() or target.is_symlink():
             validate_bank(target)
             if tree_digest(target) != tree_digest(project.source_banks[0]):
                 raise MbError(f"target Bank has different content: {target}", 4)
             continue
+        temporary: Path | None = None
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(project.source_banks[0], target)
+            _validate_bank_target(target)
+            temporary = Path(
+                tempfile.mkdtemp(prefix=".mb-copy-", dir=target.parent),
+            )
+            shutil.copytree(
+                project.source_banks[0],
+                temporary,
+                dirs_exist_ok=True,
+            )
+            validate_bank(temporary)
+            _fsync_tree(temporary)
+            if target.exists() or target.is_symlink():
+                raise OSError(f"target Bank appeared during copy: {target}")
+            os.replace(temporary, target)
+            temporary = None
+            _fsync_path(target.parent)
         except OSError as exc:
             raise MbError(f"unable to copy Bank to {target}: {exc}", 4) from exc
+        finally:
+            if temporary is not None and temporary.exists():
+                _remove_bank_temporary(temporary)
 
 
-def _merged_projects(store: RegistryStore, plan: MigrationPlan) -> dict[str, object]:
+def _merged_projects(
+    store: RegistryStore,
+    plan: MigrationPlan,
+) -> tuple[dict[str, object], dict[str, object]]:
     existing = store._load(allow_missing=True)
-    projects = dict(cast(dict[str, object], existing["projects"]))
+    expected_projects = dict(cast(dict[str, object], existing["projects"]))
+    projects = dict(expected_projects)
     for key in sorted(plan.projects):
         project = plan.projects[key]
+        _validate_bank_target(project.target_bank)
         source_digest = tree_digest(project.source_banks[0])
         if project.target_bank.exists() or project.target_bank.is_symlink():
             validate_bank(project.target_bank)
@@ -326,7 +404,7 @@ def _merged_projects(store: RegistryStore, plan: MigrationPlan) -> dict[str, obj
             "bank_path": str(project.target_bank),
             "known_roots": sorted(known_roots),
         }
-    return projects
+    return expected_projects, projects
 
 
 def _capture(transaction: BackupTransaction, path: Path, action: str) -> None:
@@ -421,16 +499,24 @@ def _apply(
 ) -> None:
     store = RegistryStore(central_home)
     registry_path = store.path
-    projects = _merged_projects(store, plan)
+    expected_projects, projects = _merged_projects(store, plan)
     mutations = _prepare_mutations(actions, registry_path)
     try:
         transaction = BackupTransaction.create(state_root, transaction_id)
     except OSError as exc:
         raise MbError(f"unable to create migration transaction: {exc}", 4) from exc
     _capture_transaction(transaction, registry_path, mutations)
+    _copy_banks(plan)
     try:
-        _copy_banks(plan)
-        store.replace_projects(projects)
+        store.replace_projects(
+            projects,
+            expected_projects=expected_projects,
+        )
+    except MbError as exc:
+        if exc.exit_code != 3:
+            _rollback_failed_apply(transaction)
+        raise
+    try:
         for mutation in mutations:
             _apply_mutation(mutation)
     except MbError:

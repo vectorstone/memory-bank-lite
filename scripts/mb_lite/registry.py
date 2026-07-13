@@ -227,9 +227,20 @@ class RegistryStore:
             self._write(data)
         return committed_entry
 
-    def replace_projects(self, projects: dict[str, object]) -> None:
+    def replace_projects(
+        self,
+        projects: dict[str, object],
+        *,
+        expected_projects: dict[str, object] | None = None,
+    ) -> None:
         with self.locked():
             data = self._load(allow_missing=True)
+            current_projects = cast(dict[str, object], data["projects"])
+            if (
+                expected_projects is not None
+                and current_projects != expected_projects
+            ):
+                raise MbError("registry changed during migration", 3)
             data["version"] = 1
             data["projects_root"] = str(self.projects_root)
             data["projects"] = projects

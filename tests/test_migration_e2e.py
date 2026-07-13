@@ -16,7 +16,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 from mb_lite.errors import MbError  # noqa: E402
 from mb_lite.migration import plan_migration  # noqa: E402
-from migrate_cleanup import _apply, _cleanup_actions  # noqa: E402
+from migrate_cleanup import _apply, _cleanup_actions, _copy_banks  # noqa: E402
 
 
 class MigrationEndToEndTest(unittest.TestCase):
@@ -246,6 +246,47 @@ class MigrationEndToEndTest(unittest.TestCase):
         self.assertTrue(self.plugin.is_file())
         self.assertFalse(self._target_bank().exists())
 
+    def test_symlinked_project_parent_cannot_escape_central_projects_root(self) -> None:
+        target = self._target_bank()
+        outside = self.home / "outside"
+        outside.mkdir()
+        target.parent.parent.mkdir(parents=True)
+        target.parent.symlink_to(outside, target_is_directory=True)
+        agents_before = self.global_agents.read_bytes()
+
+        result = self._run("--apply", "--timestamp", "bank-escape")
+
+        self.assertEqual(result.returncode, 4, result.stderr)
+        self.assertEqual(self.global_agents.read_bytes(), agents_before)
+        self.assertTrue(self.legacy_registry.is_file())
+        self.assertFalse((outside / ".memory-bank").exists())
+
+    def test_failed_bank_copy_removes_temporary_and_never_creates_final(self) -> None:
+        plan = plan_migration(self.home, self.central)
+        target = self._target_bank()
+
+        def fail_after_partial_copy(
+            _source: Path,
+            destination: Path,
+            **_options: object,
+        ) -> None:
+            destination.mkdir(parents=True, exist_ok=True)
+            (destination / "partial").write_text("partial\n", encoding="utf-8")
+            raise OSError("injected copy failure")
+
+        with patch(
+            "migrate_cleanup.shutil.copytree",
+            side_effect=fail_after_partial_copy,
+        ):
+            with self.assertRaisesRegex(MbError, "unable to copy Bank"):
+                _copy_banks(plan)
+
+        self.assertFalse(target.exists())
+        self.assertEqual(
+            list(target.parent.glob(".mb-copy-*")),
+            [],
+        )
+
     def test_transaction_manifest_is_durable_before_registry_mutation(self) -> None:
         plan = plan_migration(self.home, self.central)
         actions = _cleanup_actions(self.home, plan)
@@ -253,7 +294,13 @@ class MigrationEndToEndTest(unittest.TestCase):
         manifest = state / "pre-capture/manifest.json"
         observed_paths: list[set[str]] = []
 
-        def fail_after_inspecting_manifest(_store: object, _projects: object) -> None:
+        def fail_after_inspecting_manifest(
+            _store: object,
+            _projects: object,
+            *,
+            expected_projects: object,
+        ) -> None:
+            self.assertIsNotNone(expected_projects)
             data = json.loads(manifest.read_text(encoding="utf-8"))
             observed_paths.append({str(record["path"]) for record in data["records"]})
             raise MbError("injected registry failure", 4)
