@@ -78,6 +78,66 @@ class CliTest(unittest.TestCase):
             adopted = subprocess.run(["python3", str(CLI), "--project-root", str(repo), "init", "--adopt", old["repository_key"], "--confirm-adopt", "--json"], env=env, capture_output=True, text=True, check=True)
             self.assertEqual(json.loads(adopted.stdout)["bank_path"], old["bank_path"])
 
+    def test_repeated_init_after_adopt_keeps_adopted_bank(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            repo = self._repo(root, "git@github.com:example/old.git")
+            home = root / "m"
+            env = {**os.environ, "MB_LITE_HOME": str(home)}
+            old = json.loads(
+                subprocess.run(
+                    ["python3", str(CLI), "--project-root", str(repo), "init", "--json"],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            old_status = Path(old["bank_path"]) / "status.md"
+            old_status.write_text("# Adopted Bank\n", encoding="utf-8")
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "remote",
+                    "set-url",
+                    "origin",
+                    "git@github.com:example/new.git",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "python3",
+                    str(CLI),
+                    "--project-root",
+                    str(repo),
+                    "init",
+                    "--adopt",
+                    old["repository_key"],
+                    "--confirm-adopt",
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+
+            repeated = subprocess.run(
+                ["python3", str(CLI), "--project-root", str(repo), "init", "--json"],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+
+            self.assertEqual(json.loads(repeated.stdout)["bank_path"], old["bank_path"])
+            self.assertEqual(old_status.read_text(encoding="utf-8"), "# Adopted Bank\n")
+            banks = list((home / "projects").glob("*/.memory-bank"))
+            self.assertEqual(len(banks), 1)
+            self.assertEqual(banks[0].resolve(), Path(old["bank_path"]).resolve())
+
     def test_recall_json_and_expand(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d); repo = self._repo(root); home = root / "m"; env = {**os.environ, "MB_LITE_HOME": str(home)}

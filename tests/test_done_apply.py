@@ -250,16 +250,16 @@ class DoneApplyTest(unittest.TestCase):
         }
         from scripts.mb_lite import done as done_module
 
-        real_commit = done_module._commit_staged_file
+        real_replace = done_module._replace_staged_file
         calls = {"count": 0}
 
-        def flaky_commit(path: Path, staged_name: str) -> None:
+        def flaky_replace(path: Path, staged_name: str) -> None:
             calls["count"] += 1
             if calls["count"] == 2:
                 raise OSError("simulated replace failure")
-            real_commit(path, staged_name)
+            real_replace(path, staged_name)
 
-        with patch.object(done_module, "_commit_staged_file", side_effect=flaky_commit):
+        with patch.object(done_module, "_replace_staged_file", side_effect=flaky_replace):
             with self.assertRaisesRegex(MbError, "unable to write bank"):
                 apply_done(self.bank, self.repo, payload(self.bank), datetime.now(timezone.utc))
         after = {
@@ -268,6 +268,117 @@ class DoneApplyTest(unittest.TestCase):
         }
         self.assertEqual(before, after)
         self.assertFalse((self.bank / "notes").exists())
+
+    def test_directory_fsync_failure_rolls_back_replaced_file(self) -> None:
+        before = {
+            name: (self.bank / name).read_bytes()
+            for name in ("status.md", "checklist.md", "progress.md")
+        }
+        from scripts.mb_lite import done as done_module
+
+        real_fsync_directory = done_module._fsync_directory
+        calls = {"count": 0}
+
+        def flaky_fsync_directory(path: Path) -> None:
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise OSError("simulated directory fsync failure")
+            real_fsync_directory(path)
+
+        with patch.object(
+            done_module,
+            "_fsync_directory",
+            side_effect=flaky_fsync_directory,
+        ):
+            with self.assertRaisesRegex(MbError, "unable to write bank"):
+                apply_done(
+                    self.bank,
+                    self.repo,
+                    payload(self.bank),
+                    datetime.now(timezone.utc),
+                )
+
+        after = {
+            name: (self.bank / name).read_bytes()
+            for name in ("status.md", "checklist.md", "progress.md")
+        }
+        self.assertEqual(before, after)
+
+    def test_repeated_directory_fsync_failure_attempts_full_rollback(self) -> None:
+        before = {
+            name: (self.bank / name).read_bytes()
+            for name in ("status.md", "checklist.md", "progress.md")
+        }
+        from scripts.mb_lite import done as done_module
+
+        real_fsync_directory = done_module._fsync_directory
+        calls = {"count": 0}
+
+        def persistent_fsync_failure(path: Path) -> None:
+            calls["count"] += 1
+            if calls["count"] >= 2:
+                raise OSError("simulated persistent directory fsync failure")
+            real_fsync_directory(path)
+
+        with patch.object(
+            done_module,
+            "_fsync_directory",
+            side_effect=persistent_fsync_failure,
+        ):
+            with self.assertRaisesRegex(MbError, "unable to write bank"):
+                apply_done(
+                    self.bank,
+                    self.repo,
+                    payload(self.bank),
+                    datetime.now(timezone.utc),
+                )
+
+        after = {
+            name: (self.bank / name).read_bytes()
+            for name in ("status.md", "checklist.md", "progress.md")
+        }
+        self.assertEqual(before, after)
+
+    def test_note_fsync_failure_durably_removes_created_note(self) -> None:
+        before = {
+            name: (self.bank / name).read_bytes()
+            for name in ("status.md", "checklist.md", "progress.md")
+        }
+        from scripts.mb_lite import done as done_module
+
+        real_fsync_directory = done_module._fsync_directory
+        notes_directory = self.bank / "notes"
+        calls: list[Path] = []
+
+        def fail_first_note_fsync(path: Path) -> None:
+            calls.append(path)
+            if path == notes_directory and calls.count(path) == 1:
+                raise OSError("simulated note directory fsync failure")
+            real_fsync_directory(path)
+
+        with patch.object(
+            done_module,
+            "_fsync_directory",
+            side_effect=fail_first_note_fsync,
+        ):
+            with self.assertRaisesRegex(MbError, "unable to write bank"):
+                apply_done(
+                    self.bank,
+                    self.repo,
+                    payload(
+                        self.bank,
+                        {"title": "Central registry", "body": "Rollback note."},
+                    ),
+                    datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc),
+                )
+
+        after = {
+            name: (self.bank / name).read_bytes()
+            for name in ("status.md", "checklist.md", "progress.md")
+        }
+        self.assertEqual(before, after)
+        self.assertFalse((notes_directory / "2026-07-10_central-registry.md").exists())
+        self.assertEqual(calls.count(notes_directory), 2)
 
 
 if __name__ == "__main__":

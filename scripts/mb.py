@@ -38,7 +38,16 @@ def main(argv=None) -> int:
         if args.adopt:
             old = store.lookup(args.adopt); validate_bank(old.bank_path); entry = store.adopt(identity, args.adopt)
         else:
-            initialize_project_bank(store.projects_root, identity.project_id); entry = store.register(identity)
+            try:
+                existing = store.lookup(identity.key)
+            except MbError as exc:
+                if exc.exit_code != 2:
+                    raise
+                initialize_project_bank(store.projects_root, identity.project_id)
+            else:
+                validate_bank(existing.bank_path)
+            entry = store.register(identity)
+            validate_bank(entry.bank_path)
         payload = {"repository_key": identity.key, "project_id": entry.project_id, "bank_path": str(entry.bank_path)}
         print(json.dumps(payload, ensure_ascii=False) if args.json else f"Initialized {entry.bank_path}"); return 0
     identity, bank = _bank(args, store); validate_bank(bank)

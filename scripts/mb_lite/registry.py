@@ -210,16 +210,17 @@ class RegistryStore:
             data = self._load(allow_missing=True)
             projects = cast(dict[str, object], data["projects"])
             current = projects.get(identity.key)
-            known_roots = (
-                set(self._entry(current).known_roots)
-                if current is not None
-                else set()
-            )
+            current_entry = self._entry(current) if current is not None else None
+            known_roots = set(current_entry.known_roots) if current_entry else set()
             known_roots.add(str(identity.root))
             raw_entry = {
-                "project_id": identity.project_id,
+                "project_id": (
+                    current_entry.project_id if current_entry else identity.project_id
+                ),
                 "remote": identity.key if identity.remote else None,
-                "bank_path": str(self.bank_path(identity)),
+                "bank_path": str(
+                    current_entry.bank_path if current_entry else self.bank_path(identity)
+                ),
                 "known_roots": sorted(known_roots),
             }
             committed_entry = self._entry(raw_entry)

@@ -72,6 +72,14 @@ class MigrationEndToEndTest(unittest.TestCase):
             "<!-- memory-bank-codex:end -->\n",
             encoding="utf-8",
         )
+        self.project_claude = self.repo / "CLAUDE.md"
+        self.project_claude.write_text(
+            "user-claude\n"
+            "<!-- memory-bank:start -->\n"
+            "managed-claude\n"
+            "<!-- memory-bank:end -->\n",
+            encoding="utf-8",
+        )
 
         self.plugin = self.repo / ".opencode/plugins/memory-bank.js"
         self.plugin.parent.mkdir(parents=True)
@@ -151,6 +159,7 @@ class MigrationEndToEndTest(unittest.TestCase):
             "opencode-plugin",
         ):
             self.assertIn(action, dry_run.stdout)
+        self.assertIn(f"strip-blocks: {self.project_claude.resolve()}", dry_run.stdout)
         self.assertEqual(self._file_bytes(), before)
         self.assertFalse((self.home / ".local/state/mb-migration").exists())
 
@@ -173,6 +182,7 @@ class MigrationEndToEndTest(unittest.TestCase):
         self.assertFalse(self.legacy_registry.exists())
         self.assertEqual(self.global_agents.read_text(encoding="utf-8"), "user-global\n")
         self.assertEqual(self.project_agents.read_text(encoding="utf-8"), "user-project\n")
+        self.assertEqual(self.project_claude.read_text(encoding="utf-8"), "user-claude\n")
         self.assertFalse(self.plugin.exists())
         self.assertFalse(self.adapter_manifest.exists())
         self.assertEqual(

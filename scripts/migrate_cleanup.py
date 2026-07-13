@@ -281,13 +281,16 @@ def _cleanup_actions(home: Path, plan: MigrationPlan) -> tuple[CleanupAction, ..
     )
     for root in roots:
         project_shared = _shared_paths(root, PROJECT_SHARED_FILES)
-        agents = root / "AGENTS.md"
-        if agents.is_file() and not _is_cleanup_protected(
-            agents,
-            dynamic_protected_paths,
-            unresolved_banks,
-        ):
-            actions.append(CleanupAction("strip-blocks", agents, "managed prompt block"))
+        for name in ("AGENTS.md", "CLAUDE.md"):
+            instructions = root / name
+            if instructions.is_file() and not _is_cleanup_protected(
+                instructions,
+                dynamic_protected_paths,
+                unresolved_banks,
+            ):
+                actions.append(
+                    CleanupAction("strip-blocks", instructions, "managed prompt block"),
+                )
         for relative in PROJECT_MANIFESTS:
             manifest = root / relative
             if manifest.is_file():

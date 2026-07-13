@@ -299,9 +299,8 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _commit_staged_file(path: Path, staged_name: str) -> None:
+def _replace_staged_file(path: Path, staged_name: str) -> None:
     os.replace(staged_name, path)
-    _fsync_directory(path.parent)
 
 
 def _restore_file(path: Path, original: bytes | None) -> None:
@@ -310,6 +309,7 @@ def _restore_file(path: Path, original: bytes | None) -> None:
             path.unlink()
         except FileNotFoundError:
             pass
+        _fsync_directory(path.parent)
         return
     descriptor, name = tempfile.mkstemp(
         prefix=f".{path.name}.restore.",
@@ -320,7 +320,8 @@ def _restore_file(path: Path, original: bytes | None) -> None:
             handle.write(original)
             handle.flush()
             os.fsync(handle.fileno())
-        _commit_staged_file(path, name)
+        _replace_staged_file(path, name)
+        _fsync_directory(path.parent)
         name = ""
     finally:
         if name and os.path.exists(name):
@@ -353,13 +354,21 @@ def _write_all_or_rollback(outputs: tuple[tuple[Path, str], ...]) -> None:
             staged.append((path, _stage_content(path, content)))
         applied: list[Path] = []
         for path, staged_name in staged:
-            _commit_staged_file(path, staged_name)
+            _replace_staged_file(path, staged_name)
             applied.append(path)
+            _fsync_directory(path.parent)
         staged.clear()
     except OSError as exc:
+        rollback_failed = False
         for path in reversed(applied if "applied" in locals() else []):
-            _restore_file(path, originals[path])
-        raise MbError(f"unable to write bank: {exc}", 4) from exc
+            try:
+                _restore_file(path, originals[path])
+            except OSError:
+                rollback_failed = True
+        detail = "unable to write bank"
+        if rollback_failed:
+            detail += "; rollback durability could not be confirmed"
+        raise MbError(f"{detail}: {exc}", 4) from exc
     finally:
         for _, staged_name in staged:
             if os.path.exists(staged_name):
