@@ -599,6 +599,27 @@ class MigrationEndToEndTest(unittest.TestCase):
             [],
         )
 
+    def test_bank_copy_digest_orders_prefixed_directories_like_source(self) -> None:
+        nested = self.bank / ".pre-migrate" / "snapshot.md"
+        nested.parent.mkdir()
+        nested.write_text("nested snapshot\n", encoding="utf-8")
+        prefixed = self.bank / ".pre-migrate-20260421" / "snapshot.md"
+        prefixed.parent.mkdir()
+        prefixed.write_text("prefixed snapshot\n", encoding="utf-8")
+        plan = plan_migration(self.home, self.central)
+
+        _copy_banks(plan)
+
+        target = self._target_bank()
+        self.assertEqual(
+            (target / ".pre-migrate" / "snapshot.md").read_bytes(),
+            nested.read_bytes(),
+        )
+        self.assertEqual(
+            (target / ".pre-migrate-20260421" / "snapshot.md").read_bytes(),
+            prefixed.read_bytes(),
+        )
+
     def test_bank_final_placement_symlink_race_cannot_write_outside(self) -> None:
         plan = plan_migration(self.home, self.central)
         target = self._target_bank()

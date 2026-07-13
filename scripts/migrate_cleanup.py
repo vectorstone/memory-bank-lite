@@ -462,7 +462,10 @@ def _bank_files(
 
 def _bank_digest_descriptor(descriptor: int) -> str:
     digest = sha256()
-    for relative, content in sorted(_bank_files(descriptor)):
+    for relative, content in sorted(
+        _bank_files(descriptor),
+        key=lambda item: Path(item[0]).parts,
+    ):
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
         digest.update(content)
