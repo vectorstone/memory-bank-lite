@@ -2,21 +2,127 @@
 
 ## 1. Baseline
 
-Capture the `onduty` worktree state, run the migration dry-run, and confirm the
-worktree state is byte-identical afterward:
+Capture file content, type, mode, and symlink targets before and after the
+dry-run. The snapshot intentionally excludes only `onduty/.git`; it includes
+tracked and untracked working-tree content. Run the block in one shell so the
+snapshot function is available for both captures:
 
 ```bash
+mb_lite_snapshot() {
+  python3 - <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+import stat
+
+home = Path.home()
+roots = (
+    ("codex-config", home / ".codex/AGENTS.md", False),
+    ("codex-rules", home / ".codex/RULES.md", False),
+    ("codex-hooks", home / ".codex/hooks.json", False),
+    ("codex-settings", home / ".codex/settings.json", False),
+    ("codex-prompts", home / ".codex/prompts", False),
+    ("codex-skills", home / ".codex/skills", False),
+    ("codex-registry", home / ".codex/memory-bank", False),
+    ("claude-config", home / ".claude/CLAUDE.md", False),
+    ("claude-agents-config", home / ".claude/AGENTS.md", False),
+    ("claude-rules", home / ".claude/RULES.md", False),
+    ("claude-hooks-config", home / ".claude/hooks.json", False),
+    ("claude-settings", home / ".claude/settings.json", False),
+    ("claude-agents", home / ".claude/agents", False),
+    ("claude-commands", home / ".claude/commands", False),
+    ("claude-hooks", home / ".claude/hooks", False),
+    ("claude-skills", home / ".claude/skills", False),
+    ("claude-registry", home / ".claude/memory-bank", False),
+    ("claude-mb-config", home / ".claude/memory-bank-config.json", False),
+    ("opencode", home / ".config/opencode", False),
+    ("cursor-agents", home / ".cursor/AGENTS.md", False),
+    ("cursor-rules", home / ".cursor/RULES.md", False),
+    ("cursor-hooks", home / ".cursor/hooks.json", False),
+    ("cursor-settings", home / ".cursor/settings.json", False),
+    ("cursor-manifest", home / ".cursor/.mb-manifest.json", False),
+    ("cursor-commands", home / ".cursor/commands", False),
+    ("cursor-skills", home / ".cursor/skills", False),
+    ("cursor-registry", home / ".cursor/memory-bank", False),
+    ("pi-agents", home / ".pi/agent/AGENTS.md", False),
+    ("pi-rules", home / ".pi/agent/RULES.md", False),
+    ("pi-hooks", home / ".pi/agent/hooks.json", False),
+    ("pi-settings", home / ".pi/agent/settings.json", False),
+    ("pi-prompts", home / ".pi/agent/prompts", False),
+    ("pi-skills", home / ".pi/agent/skills", False),
+    ("pi-registry", home / ".pi/agent/memory-bank", False),
+    (
+        "central-memory",
+        Path("/Users/wangxiaoguang/Docs/obsidian/memory-bank"),
+        False,
+    ),
+    ("onduty", Path("/Users/wangxiaoguang/IdeaProjects/onduty"), True),
+)
+
+
+def emit(label: str, relative: str, kind: str, mode: int, value: str) -> None:
+    print(
+        json.dumps(
+            {
+                "kind": kind,
+                "label": label,
+                "mode": f"{mode:04o}",
+                "path": relative,
+                "value": value,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+
+
+def visit(label: str, root: Path, path: Path, exclude_git: bool) -> None:
+    relative = "." if path == root else path.relative_to(root).as_posix()
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        emit(label, relative, "missing", 0, "")
+        return
+    mode = stat.S_IMODE(metadata.st_mode)
+    if stat.S_ISLNK(metadata.st_mode):
+        emit(label, relative, "symlink", mode, os.readlink(path))
+        return
+    if stat.S_ISREG(metadata.st_mode):
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        emit(label, relative, "file", mode, f"{metadata.st_size}:{digest}")
+        return
+    if stat.S_ISDIR(metadata.st_mode):
+        emit(label, relative, "directory", mode, "")
+        for child in sorted(path.iterdir(), key=lambda value: value.name):
+            if exclude_git and path == root and child.name == ".git":
+                continue
+            visit(label, root, child, exclude_git)
+        return
+    emit(label, relative, "special", mode, str(metadata.st_rdev))
+
+
+for label, root, exclude_git in roots:
+    visit(label, root, root, exclude_git)
+PY
+}
+
+mb_lite_snapshot > /tmp/mb-lite-fs-before.jsonl
 git -C /Users/wangxiaoguang/IdeaProjects/onduty status --short > /tmp/mb-lite-onduty-before.txt
 bash migrate-cleanup.sh > /tmp/mb-lite-dry-run.txt
+mb_lite_snapshot > /tmp/mb-lite-fs-after.jsonl
 git -C /Users/wangxiaoguang/IdeaProjects/onduty status --short > /tmp/mb-lite-onduty-after.txt
+cmp /tmp/mb-lite-fs-before.jsonl /tmp/mb-lite-fs-after.jsonl
 cmp /tmp/mb-lite-onduty-before.txt /tmp/mb-lite-onduty-after.txt
+shasum -a 256 /tmp/mb-lite-fs-before.jsonl /tmp/mb-lite-fs-after.jsonl
 ```
 
 Review `/tmp/mb-lite-dry-run.txt`. As applicable to the current machine, the
 dry-run must list central registry creation or merge, old prompt blocks, old
 hooks, old agents and commands, and registered project adapters. It must not
 modify user configuration, project configuration, registrations, or Bank
-content.
+content. Both `cmp` commands must exit zero; matching snapshot hashes provide a
+compact audit record.
 
 ## 2. Human Apply Gate
 
