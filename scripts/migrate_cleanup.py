@@ -222,12 +222,18 @@ def _cleanup_actions(home: Path, plan: MigrationPlan) -> tuple[CleanupAction, ..
         _anchored_path(path) for path in plan.retained_legacy_registries
     )
     unresolved_bank_locators = frozenset(
-        _anchored_path(record.bank_path) for record in plan.unresolved_records
+        _anchored_path(record.bank_path)
+        for record in plan.unresolved_records
+        if record.bank_path is not None
     )
     legacy_protected_paths = retained_registries | unresolved_bank_locators
     unresolved_banks = tuple(
         sorted(
-            {record.bank_path.resolve() for record in plan.unresolved_records},
+            {
+                record.bank_path.resolve()
+                for record in plan.unresolved_records
+                if record.bank_path is not None
+            },
             key=str,
         ),
     )
@@ -314,11 +320,12 @@ def _render_plan(
                 str(value.bank_path),
             ),
         ):
+            bank_path = record.bank_path if record.bank_path is not None else "unavailable"
             lines.append(
                 "unresolved-record: "
                 f"registry={record.registry_path}; "
                 f"root={record.root}; "
-                f"bank={record.bank_path}; "
+                f"bank={bank_path}; "
                 f"reason={record.reason}; registry retained",
             )
     return "\n".join(lines)

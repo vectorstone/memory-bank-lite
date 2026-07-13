@@ -20,7 +20,7 @@ class PlannedProject:
 class UnresolvedLegacyRecord:
     registry_path: Path
     root: Path
-    bank_path: Path
+    bank_path: Path | None
     reason: str
 
 
@@ -59,7 +59,7 @@ def tree_digest(bank: Path) -> str:
     return digest.hexdigest()
 
 
-def _records(path: Path) -> list[tuple[Path, Path]]:
+def _records(path: Path) -> list[tuple[Path, object]]:
     if not path.exists():
         return []
     try:
@@ -69,11 +69,9 @@ def _records(path: Path) -> list[tuple[Path, Path]]:
     projects = data.get("projects", {})
     if not isinstance(projects, dict):
         raise MbError(f"corrupt legacy registry projects: {path}", 4)
-    result: list[tuple[Path, Path]] = []
+    result: list[tuple[Path, object]] = []
     for root, raw in projects.items():
-        if not isinstance(raw, dict) or not isinstance(raw.get("bank_path"), str):
-            raise MbError(f"invalid legacy registry entry for {root}", 4)
-        result.append((Path(root), Path(raw["bank_path"])))
+        result.append((Path(root), raw))
     return result
 
 
@@ -84,18 +82,30 @@ def plan_migration(home: Path, central_home: Path) -> MigrationPlan:
     unresolved_records: list[UnresolvedLegacyRecord] = []
     for registry in registries:
         registry_is_retained = False
-        for root, raw_bank in _records(registry):
+        for root, raw in _records(registry):
+            raw_bank = (
+                Path(raw["bank_path"])
+                if isinstance(raw, dict) and isinstance(raw.get("bank_path"), str)
+                else None
+            )
             if not root.is_dir():
                 unresolved_records.append(
                     UnresolvedLegacyRecord(
                         registry,
                         root,
                         raw_bank,
-                        "legacy project root does not exist",
+                        (
+                            "legacy project root does not exist"
+                            if raw_bank is not None
+                            else "legacy project root does not exist; "
+                            "bank_path is unavailable"
+                        ),
                     ),
                 )
                 registry_is_retained = True
                 continue
+            if raw_bank is None:
+                raise MbError(f"invalid legacy registry entry for {root}", 4)
             identity = resolve_identity(root)
             bank = validate_bank(raw_bank.resolve())
             current = grouped.setdefault(identity.key, (identity, [], []))

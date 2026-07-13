@@ -109,6 +109,82 @@ class MigrationTest(unittest.TestCase):
             self.assertEqual(unresolved.bank_path, unresolved_bank)
             self.assertEqual(unresolved.reason, "legacy project root does not exist")
 
+    def test_missing_root_invalid_bank_is_unresolved_and_retains_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            repo = home / "repo"
+            subprocess.run(
+                ["git", "init", "-b", "main", str(repo)],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "remote",
+                    "add",
+                    "origin",
+                    "git@github.com:example/repo.git",
+                ],
+                check=True,
+            )
+            valid_bank = home / "valid-bank" / ".memory-bank"
+            valid_bank.mkdir(parents=True)
+            for name in ("status.md", "checklist.md", "progress.md"):
+                (valid_bank / name).write_text(f"# {name}\n", encoding="utf-8")
+            missing_root = home / "removed-repo"
+            registry = legacy_registry_paths(home)[0]
+            registry.parent.mkdir(parents=True)
+            registry.write_text(
+                json.dumps(
+                    {
+                        "projects": {
+                            str(repo): {"bank_path": str(valid_bank)},
+                            str(missing_root): {"bank_path": 7},
+                        },
+                    },
+                ),
+                encoding="utf-8",
+            )
+
+            plan = plan_migration(home, home / "central")
+
+            self.assertEqual(tuple(plan.projects), ("github.com/example/repo",))
+            self.assertEqual(plan.removable_legacy_registries, ())
+            self.assertEqual(plan.retained_legacy_registries, (registry,))
+            self.assertEqual(len(plan.unresolved_records), 1)
+            unresolved = plan.unresolved_records[0]
+            self.assertEqual(unresolved.registry_path, registry)
+            self.assertEqual(unresolved.root, missing_root)
+            self.assertIsNone(unresolved.bank_path)
+            self.assertEqual(
+                unresolved.reason,
+                "legacy project root does not exist; bank_path is unavailable",
+            )
+
+    def test_existing_root_invalid_bank_remains_corrupt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            repo = home / "repo"
+            subprocess.run(
+                ["git", "init", "-b", "main", str(repo)],
+                check=True,
+                capture_output=True,
+            )
+            registry = legacy_registry_paths(home)[0]
+            registry.parent.mkdir(parents=True)
+            registry.write_text(
+                json.dumps(
+                    {"projects": {str(repo): {"bank_path": 7}}},
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(MbError, "invalid legacy registry entry"):
+                plan_migration(home, home / "central")
+
     def test_tree_digest_ignores_lock_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             bank = Path(directory) / ".memory-bank"
