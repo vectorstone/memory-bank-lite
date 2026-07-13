@@ -31,6 +31,23 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _mkdir_durable(path: Path) -> None:
+    missing: list[Path] = []
+    current = path
+    while not current.exists():
+        missing.append(current)
+        if current.parent == current:
+            raise OSError(f"unable to find existing parent for {path}")
+        current = current.parent
+    if current.is_symlink() or not current.is_dir():
+        raise OSError(f"directory ancestor is not a real directory: {current}")
+    for directory in reversed(missing):
+        directory.mkdir()
+        _fsync_directory(directory.parent)
+    if path.is_symlink() or not path.is_dir():
+        raise OSError(f"path is not a real directory: {path}")
+
+
 def _atomic_write(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -83,6 +100,15 @@ def _record_path(value: object) -> Path:
     return path
 
 
+def _validate_record_parent(record: dict[str, object], path: Path) -> None:
+    raw_parent = record.get("parent")
+    if not isinstance(raw_parent, str) or not raw_parent or "\0" in raw_parent:
+        raise ValueError("invalid record parent")
+    parent = Path(raw_parent)
+    if not parent.is_absolute() or path.parent.resolve() != parent:
+        raise ValueError("rollback destination ancestry changed")
+
+
 def _backup_content(directory: Path, record: dict[str, object]) -> bytes:
     raw_backup = record.get("backup")
     if (
@@ -109,9 +135,22 @@ def _backup_content(directory: Path, record: dict[str, object]) -> bytes:
 
 def _validated_records(directory: Path) -> tuple[RollbackRecord, ...]:
     manifest = directory / "manifest.json"
-    if manifest.is_symlink() or not manifest.is_file():
+    checksum = directory / "manifest.sha256"
+    if (
+        manifest.is_symlink()
+        or not manifest.is_file()
+        or checksum.is_symlink()
+        or not checksum.is_file()
+    ):
         raise ValueError("invalid manifest file")
-    data = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest_content = manifest.read_bytes()
+    expected_checksum = checksum.read_text(encoding="ascii").strip()
+    if (
+        not _valid_digest(expected_checksum)
+        or sha256(manifest_content).hexdigest() != expected_checksum
+    ):
+        raise ValueError("manifest checksum mismatch")
+    data = json.loads(manifest_content.decode("utf-8"))
     if (
         not isinstance(data, dict)
         or set(data) != {"version", "records"}
@@ -127,6 +166,7 @@ def _validated_records(directory: Path) -> tuple[RollbackRecord, ...]:
             raise ValueError("invalid rollback record")
         kind = raw_record.get("kind")
         path = _record_path(raw_record.get("path"))
+        _validate_record_parent(raw_record, path)
         action = raw_record.get("action")
         if not isinstance(action, str) or not action:
             raise ValueError("invalid rollback action")
@@ -134,7 +174,14 @@ def _validated_records(directory: Path) -> tuple[RollbackRecord, ...]:
             raise ValueError("duplicate rollback path")
         seen_paths.add(path)
         if kind == "file":
-            if set(raw_record) != {"path", "backup", "sha256", "action", "kind"}:
+            if set(raw_record) != {
+                "path",
+                "parent",
+                "backup",
+                "sha256",
+                "action",
+                "kind",
+            }:
                 raise ValueError("invalid file rollback record")
             result.append(
                 RollbackRecord(path, kind, content=_backup_content(directory, raw_record)),
@@ -142,6 +189,7 @@ def _validated_records(directory: Path) -> tuple[RollbackRecord, ...]:
         elif kind == "symlink":
             if set(raw_record) != {
                 "path",
+                "parent",
                 "backup",
                 "sha256",
                 "target",
@@ -162,7 +210,14 @@ def _validated_records(directory: Path) -> tuple[RollbackRecord, ...]:
             result.append(RollbackRecord(path, kind, target=target))
         elif kind == "missing":
             if (
-                set(raw_record) != {"path", "backup", "sha256", "action", "kind"}
+                set(raw_record) != {
+                    "path",
+                    "parent",
+                    "backup",
+                    "sha256",
+                    "action",
+                    "kind",
+                }
                 or raw_record.get("backup") is not None
                 or raw_record.get("sha256") is not None
             ):
@@ -180,8 +235,9 @@ class BackupTransaction:
 
     @classmethod
     def create(cls, state_root: Path, timestamp: str) -> "BackupTransaction":
+        _mkdir_durable(state_root)
         directory = state_root / timestamp
-        directory.mkdir(parents=True, exist_ok=False)
+        directory.mkdir(exist_ok=False)
         _fsync_directory(state_root)
         return cls(directory)
 
@@ -191,6 +247,7 @@ class BackupTransaction:
             self.records.append(
                 {
                     "path": str(path),
+                    "parent": str(path.parent.resolve()),
                     "backup": None,
                     "sha256": sha256(target.encode("utf-8")).hexdigest(),
                     "target": target,
@@ -209,6 +266,7 @@ class BackupTransaction:
         self.records.append(
             {
                 "path": str(path),
+                "parent": str(path.parent.resolve()),
                 "backup": name,
                 "sha256": sha256(data).hexdigest(),
                 "action": action,
@@ -220,6 +278,7 @@ class BackupTransaction:
         self.records.append(
             {
                 "path": str(path),
+                "parent": str(path.parent.resolve()),
                 "backup": None,
                 "sha256": None,
                 "action": action,
@@ -234,6 +293,8 @@ class BackupTransaction:
             indent=2,
         ).encode("utf-8") + b"\n"
         _atomic_write(self.directory / "manifest.json", content)
+        checksum = sha256(content).hexdigest().encode("ascii") + b"\n"
+        _atomic_write(self.directory / "manifest.sha256", checksum)
 
     @staticmethod
     def rollback(directory: Path) -> None:

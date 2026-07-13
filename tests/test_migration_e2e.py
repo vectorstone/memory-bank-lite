@@ -267,15 +267,19 @@ class MigrationEndToEndTest(unittest.TestCase):
 
         def fail_after_partial_copy(
             _source: Path,
-            destination: Path,
-            **_options: object,
+            destination: int,
         ) -> None:
-            destination.mkdir(parents=True, exist_ok=True)
-            (destination / "partial").write_text("partial\n", encoding="utf-8")
+            os.mkdir(".memory-bank", dir_fd=destination)
+            partial = os.open(
+                "partial",
+                os.O_WRONLY | os.O_CREAT,
+                dir_fd=destination,
+            )
+            os.close(partial)
             raise OSError("injected copy failure")
 
         with patch(
-            "migrate_cleanup.shutil.copytree",
+            "migrate_cleanup._copy_bank_to_project",
             side_effect=fail_after_partial_copy,
         ):
             with self.assertRaisesRegex(MbError, "unable to copy Bank"):
@@ -283,9 +287,43 @@ class MigrationEndToEndTest(unittest.TestCase):
 
         self.assertFalse(target.exists())
         self.assertEqual(
-            list(target.parent.glob(".mb-copy-*")),
+            list(target.parent.parent.glob(".mb-copy-*")),
             [],
         )
+
+    def test_bank_final_placement_symlink_race_cannot_write_outside(self) -> None:
+        plan = plan_migration(self.home, self.central)
+        target = self._target_bank()
+        outside = self.home / "outside-race"
+        outside.mkdir()
+        real_rename = os.rename
+
+        def create_symlink_before_rename(
+            source: str,
+            destination: str,
+            *,
+            src_dir_fd: int,
+            dst_dir_fd: int,
+        ) -> None:
+            os.symlink(str(outside), destination, dir_fd=dst_dir_fd)
+            real_rename(
+                source,
+                destination,
+                src_dir_fd=src_dir_fd,
+                dst_dir_fd=dst_dir_fd,
+            )
+
+        with patch(
+            "migrate_cleanup.os.rename",
+            autospec=True,
+            side_effect=create_symlink_before_rename,
+        ) as rename:
+            with self.assertRaisesRegex(MbError, "unable to copy Bank") as raised:
+                _copy_banks(plan)
+
+        self.assertEqual(rename.call_count, 1, raised.exception)
+        self.assertFalse((outside / ".memory-bank").exists())
+        self.assertFalse(target.exists())
 
     def test_transaction_manifest_is_durable_before_registry_mutation(self) -> None:
         plan = plan_migration(self.home, self.central)

@@ -2,13 +2,15 @@
 import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
-import shutil
+import stat
 import sys
 import tempfile
 from typing import Any, cast
+from uuid import uuid4
 
 from mb_lite.bank import validate_bank
 from mb_lite.cleanup import (
@@ -282,55 +284,218 @@ def _unlink_if_present(path: Path) -> None:
 
 def _validate_bank_target(target: Path) -> None:
     projects_root = target.parent.parent
-    try:
-        resolved_root = projects_root.resolve()
-        resolved_parent = target.parent.resolve()
-        relative_parent = resolved_parent.relative_to(resolved_root)
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise MbError(f"target Bank escapes projects_root: {target}", 4) from exc
     if (
         target.name != ".memory-bank"
+        or target.parent.name in {"", ".", ".."}
         or projects_root.is_symlink()
-        or target.parent.is_symlink()
-        or len(relative_parent.parts) != 1
     ):
         raise MbError(f"target Bank escapes projects_root: {target}", 4)
 
 
-def _fsync_path(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+def _fsync_descriptor(descriptor: int) -> None:
+    os.fsync(descriptor)
+
+
+def _read_descriptor(descriptor: int) -> bytes:
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def _open_directory_at(parent_descriptor: int, name: str) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    return os.open(name, flags, dir_fd=parent_descriptor)
+
+
+def _bank_files(
+    descriptor: int,
+    prefix: str = "",
+) -> list[tuple[str, bytes]]:
+    result: list[tuple[str, bytes]] = []
+    for name in sorted(os.listdir(descriptor)):
+        child_stat = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        relative = f"{prefix}/{name}" if prefix else name
+        if stat.S_ISDIR(child_stat.st_mode):
+            child_descriptor = _open_directory_at(descriptor, name)
+            try:
+                result.extend(_bank_files(child_descriptor, relative))
+            finally:
+                os.close(child_descriptor)
+        elif stat.S_ISREG(child_stat.st_mode):
+            if name == ".mb-lite.lock":
+                continue
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            child_descriptor = os.open(name, flags, dir_fd=descriptor)
+            try:
+                result.append((relative, _read_descriptor(child_descriptor)))
+            finally:
+                os.close(child_descriptor)
+        else:
+            raise OSError(f"unsupported Bank entry: {relative}")
+    return result
+
+
+def _bank_digest_descriptor(descriptor: int) -> str:
+    digest = sha256()
+    for relative, content in sorted(_bank_files(descriptor)):
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(content)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _validate_bank_descriptor(descriptor: int) -> None:
+    for name in ("status.md", "checklist.md", "progress.md"):
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        file_descriptor = os.open(name, flags, dir_fd=descriptor)
+        try:
+            _read_descriptor(file_descriptor).decode("utf-8")
+        finally:
+            os.close(file_descriptor)
+
+
+def _write_all(descriptor: int, content: bytes) -> None:
+    offset = 0
+    while offset < len(content):
+        written = os.write(descriptor, content[offset:])
+        if written == 0:
+            raise OSError("short write while copying Bank")
+        offset += written
+
+
+def _copy_directory_to_descriptor(source: Path, destination: int) -> None:
+    for path in sorted(source.iterdir(), key=lambda value: value.name):
+        source_stat = path.lstat()
+        if stat.S_ISDIR(source_stat.st_mode):
+            os.mkdir(path.name, stat.S_IMODE(source_stat.st_mode), dir_fd=destination)
+            child_descriptor = _open_directory_at(destination, path.name)
+            try:
+                _copy_directory_to_descriptor(path, child_descriptor)
+                _fsync_descriptor(child_descriptor)
+            finally:
+                os.close(child_descriptor)
+        elif stat.S_ISREG(source_stat.st_mode):
+            source_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            source_descriptor = os.open(path, source_flags)
+            try:
+                destination_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                destination_descriptor = os.open(
+                    path.name,
+                    destination_flags,
+                    stat.S_IMODE(source_stat.st_mode),
+                    dir_fd=destination,
+                )
+                try:
+                    _write_all(
+                        destination_descriptor,
+                        _read_descriptor(source_descriptor),
+                    )
+                    os.fsync(destination_descriptor)
+                finally:
+                    os.close(destination_descriptor)
+            finally:
+                os.close(source_descriptor)
+        else:
+            raise OSError(f"unsupported Bank source entry: {path}")
+
+
+def _copy_bank_to_project(source: Path, project_descriptor: int) -> None:
+    os.mkdir(".memory-bank", 0o700, dir_fd=project_descriptor)
+    bank_descriptor = _open_directory_at(project_descriptor, ".memory-bank")
     try:
-        os.fsync(descriptor)
+        _copy_directory_to_descriptor(source, bank_descriptor)
+        _validate_bank_descriptor(bank_descriptor)
+        if _bank_digest_descriptor(bank_descriptor) != tree_digest(source):
+            raise OSError("copied Bank digest mismatch")
+        _fsync_descriptor(bank_descriptor)
+    finally:
+        os.close(bank_descriptor)
+
+
+def _remove_tree_at(parent_descriptor: int, name: str) -> None:
+    descriptor = _open_directory_at(parent_descriptor, name)
+    try:
+        for child in os.listdir(descriptor):
+            child_stat = os.stat(child, dir_fd=descriptor, follow_symlinks=False)
+            if stat.S_ISDIR(child_stat.st_mode):
+                _remove_tree_at(descriptor, child)
+            else:
+                os.unlink(child, dir_fd=descriptor)
     finally:
         os.close(descriptor)
+    os.rmdir(name, dir_fd=parent_descriptor)
 
 
-def _fsync_tree(root: Path) -> None:
-    directories = [root]
-    for path in sorted(root.rglob("*")):
-        if path.is_symlink():
-            continue
-        if path.is_dir():
-            directories.append(path)
-            continue
-        descriptor = os.open(path, os.O_RDONLY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-    for directory in reversed(directories):
-        _fsync_path(directory)
-
-
-def _remove_bank_temporary(temporary: Path) -> None:
+def _open_projects_root(projects_root: Path, create: bool) -> int | None:
+    if create:
+        projects_root.mkdir(parents=True, exist_ok=True)
+    elif not projects_root.exists() and not projects_root.is_symlink():
+        return None
+    if projects_root.is_symlink() or not projects_root.is_dir():
+        raise MbError(f"projects_root is not a real directory: {projects_root}", 4)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        shutil.rmtree(temporary)
-        _fsync_path(temporary.parent)
+        return os.open(projects_root, flags)
     except OSError as exc:
-        raise MbError(
-            f"unable to clean temporary Bank: {temporary}: {exc}",
-            4,
-        ) from exc
+        raise MbError(f"unable to open projects_root: {projects_root}: {exc}", 4) from exc
+
+
+def _existing_bank_matches(
+    target: Path,
+    source_digest: str,
+    projects_descriptor: int,
+) -> bool:
+    project_id = target.parent.name
+    try:
+        try:
+            project_stat = os.stat(
+                project_id,
+                dir_fd=projects_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return False
+    except OSError as exc:
+        raise MbError(f"unable to inspect target project: {target.parent}: {exc}", 4) from exc
+    if not stat.S_ISDIR(project_stat.st_mode):
+        raise MbError(f"target project is not a real directory: {target.parent}", 4)
+    try:
+        project_descriptor = _open_directory_at(
+            projects_descriptor,
+            project_id,
+        )
+    except OSError as exc:
+        raise MbError(f"unable to open target project: {target.parent}: {exc}", 4) from exc
+    try:
+        try:
+            bank_descriptor = _open_directory_at(project_descriptor, ".memory-bank")
+            try:
+                _validate_bank_descriptor(bank_descriptor)
+                bank_digest = _bank_digest_descriptor(bank_descriptor)
+            finally:
+                os.close(bank_descriptor)
+        except (OSError, UnicodeError) as exc:
+            raise MbError(f"target Bank is invalid: {target}", 4) from exc
+        if bank_digest != source_digest:
+            raise MbError(f"target Bank has different content: {target}", 4)
+        return True
+    finally:
+        os.close(project_descriptor)
+
+
+def _inspect_existing_bank(target: Path, source_digest: str) -> bool:
+    _validate_bank_target(target)
+    projects_descriptor = _open_projects_root(target.parent.parent, create=False)
+    if projects_descriptor is None:
+        return False
+    try:
+        return _existing_bank_matches(target, source_digest, projects_descriptor)
+    finally:
+        os.close(projects_descriptor)
 
 
 def _copy_banks(plan: MigrationPlan) -> None:
@@ -338,35 +503,59 @@ def _copy_banks(plan: MigrationPlan) -> None:
         project = plan.projects[key]
         target = project.target_bank
         _validate_bank_target(target)
-        if target.exists() or target.is_symlink():
-            validate_bank(target)
-            if tree_digest(target) != tree_digest(project.source_banks[0]):
-                raise MbError(f"target Bank has different content: {target}", 4)
+        source_digest = tree_digest(project.source_banks[0])
+        if _inspect_existing_bank(target, source_digest):
             continue
-        temporary: Path | None = None
+        projects_descriptor = _open_projects_root(target.parent.parent, create=True)
+        if projects_descriptor is None:
+            raise MbError(f"unable to open projects_root: {target.parent.parent}", 4)
+        temporary_name = f".mb-copy-{uuid4().hex}"
+        temporary_descriptor: int | None = None
         try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            _validate_bank_target(target)
-            temporary = Path(
-                tempfile.mkdtemp(prefix=".mb-copy-", dir=target.parent),
+            if _existing_bank_matches(target, source_digest, projects_descriptor):
+                continue
+            os.mkdir(temporary_name, 0o700, dir_fd=projects_descriptor)
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
             )
-            shutil.copytree(
-                project.source_banks[0],
-                temporary,
-                dirs_exist_ok=True,
+            temporary_descriptor = os.open(
+                temporary_name,
+                flags,
+                dir_fd=projects_descriptor,
             )
-            validate_bank(temporary)
-            _fsync_tree(temporary)
-            if target.exists() or target.is_symlink():
-                raise OSError(f"target Bank appeared during copy: {target}")
-            os.replace(temporary, target)
-            temporary = None
-            _fsync_path(target.parent)
+            _copy_bank_to_project(project.source_banks[0], temporary_descriptor)
+            _fsync_descriptor(temporary_descriptor)
+            os.close(temporary_descriptor)
+            temporary_descriptor = None
+            os.rename(
+                temporary_name,
+                target.parent.name,
+                src_dir_fd=projects_descriptor,
+                dst_dir_fd=projects_descriptor,
+            )
+            temporary_name = ""
+            _fsync_descriptor(projects_descriptor)
         except OSError as exc:
             raise MbError(f"unable to copy Bank to {target}: {exc}", 4) from exc
         finally:
-            if temporary is not None and temporary.exists():
-                _remove_bank_temporary(temporary)
+            if temporary_descriptor is not None:
+                os.close(temporary_descriptor)
+            try:
+                if temporary_name:
+                    try:
+                        _remove_tree_at(projects_descriptor, temporary_name)
+                        _fsync_descriptor(projects_descriptor)
+                    except FileNotFoundError:
+                        temporary_name = ""
+                    except OSError as exc:
+                        raise MbError(
+                            f"unable to clean temporary Bank: {temporary_name}: {exc}",
+                            4,
+                        ) from exc
+            finally:
+                os.close(projects_descriptor)
 
 
 def _merged_projects(
@@ -380,13 +569,7 @@ def _merged_projects(
         project = plan.projects[key]
         _validate_bank_target(project.target_bank)
         source_digest = tree_digest(project.source_banks[0])
-        if project.target_bank.exists() or project.target_bank.is_symlink():
-            validate_bank(project.target_bank)
-            if tree_digest(project.target_bank) != source_digest:
-                raise MbError(
-                    f"target Bank has different content: {project.target_bank}",
-                    4,
-                )
+        _inspect_existing_bank(project.target_bank, source_digest)
         known_roots = {str(root) for root in project.known_roots}
         current = projects.get(key)
         if current is not None:
