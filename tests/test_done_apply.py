@@ -166,6 +166,66 @@ class DoneApplyTest(unittest.TestCase):
         self.assertIsNone(result.note_path)
         self.assertFalse((self.bank / "notes").exists())
 
+    def test_apply_rejects_symlinked_notes_directory_without_outside_write(self) -> None:
+        outside = self.root / "outside-notes"
+        outside.mkdir()
+        (self.bank / "notes").symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaisesRegex(MbError, "notes directory") as raised:
+            apply_done(
+                self.bank,
+                self.repo,
+                payload(
+                    self.bank,
+                    {"title": "Central registry", "body": "Do not disclose."},
+                ),
+                datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc),
+            )
+
+        self.assertEqual(raised.exception.exit_code, 4)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_apply_rejects_symlinked_note_target_without_outside_write(self) -> None:
+        notes = self.bank / "notes"
+        notes.mkdir()
+        outside = self.root / "outside-note.md"
+        target = notes / "2026-07-10_central-registry.md"
+        target.symlink_to(outside)
+
+        with self.assertRaisesRegex(MbError, "note already exists") as raised:
+            apply_done(
+                self.bank,
+                self.repo,
+                payload(
+                    self.bank,
+                    {"title": "Central registry", "body": "Do not disclose."},
+                ),
+                datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc),
+            )
+
+        self.assertEqual(raised.exception.exit_code, 4)
+        self.assertTrue(target.is_symlink())
+        self.assertFalse(outside.exists())
+
+    def test_apply_rejects_symlinked_core_before_drafting_or_writing(self) -> None:
+        raw = payload(self.bank)
+        outside = self.root / "outside-status.md"
+        outside.write_text("# Outside\n", encoding="utf-8")
+        status = self.bank / "status.md"
+        status.unlink()
+        status.symlink_to(outside)
+
+        with self.assertRaisesRegex(MbError, "missing readable status.md") as raised:
+            apply_done(
+                self.bank,
+                self.repo,
+                raw,
+                datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc),
+            )
+
+        self.assertEqual(raised.exception.exit_code, 4)
+        self.assertEqual(outside.read_text(encoding="utf-8"), "# Outside\n")
+
     def test_payload_text_is_data_and_is_never_executed(self) -> None:
         sentinel = self.root / "executed"
         raw = payload(self.bank)

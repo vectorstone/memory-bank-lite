@@ -1,9 +1,15 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import scripts.mb_lite.bank as bank_module
-from scripts.mb_lite.bank import initialize_bank, template_root, validate_bank
+from scripts.mb_lite.bank import (
+    initialize_bank,
+    initialize_project_bank,
+    template_root,
+    validate_bank,
+)
 from scripts.mb_lite.errors import MbError
 
 
@@ -68,6 +74,31 @@ class BankTests(unittest.TestCase):
             with self.assertRaises(MbError):
                 initialize_bank(bank)
 
+    def test_project_initialize_failure_cleans_stage_without_final_bank(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            projects_root = Path(temp_dir) / "projects"
+            with patch.object(
+                bank_module,
+                "_populate_bank",
+                side_effect=OSError("simulated template failure"),
+            ):
+                with self.assertRaisesRegex(MbError, "unable to initialize Bank"):
+                    initialize_project_bank(projects_root, "repo-123")
+
+            self.assertFalse((projects_root / "repo-123").exists())
+            self.assertEqual(list(projects_root.iterdir()), [])
+
+    def test_project_reinitialize_preserves_existing_core_content(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            projects_root = Path(temp_dir) / "projects"
+            bank = initialize_project_bank(projects_root, "repo-123")
+            status = bank / "status.md"
+            status.write_text("# User Status\n", encoding="utf-8")
+
+            initialize_project_bank(projects_root, "repo-123")
+
+            self.assertEqual(status.read_text(encoding="utf-8"), "# User Status\n")
+
     def test_validate_rejects_invalid_utf8_core(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             bank = Path(temp_dir) / ".memory-bank"
@@ -77,6 +108,26 @@ class BankTests(unittest.TestCase):
             (bank / "progress.md").write_bytes(b"\xff")
             with self.assertRaisesRegex(MbError, r"missing readable progress\.md"):
                 validate_bank(bank)
+
+    def test_validate_rejects_symlinked_core_files(self):
+        for linked_name in ("status.md", "checklist.md", "progress.md"):
+            with self.subTest(linked_name=linked_name), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                bank = root / ".memory-bank"
+                bank.mkdir()
+                outside = root / "outside.md"
+                outside.write_text("outside secret\n", encoding="utf-8")
+                for name in ("status.md", "checklist.md", "progress.md"):
+                    target = bank / name
+                    if name == linked_name:
+                        target.symlink_to(outside)
+                    else:
+                        target.write_text(f"{name}\n", encoding="utf-8")
+
+                with self.assertRaisesRegex(MbError, rf"missing readable {linked_name}") as raised:
+                    validate_bank(bank)
+
+                self.assertEqual(raised.exception.exit_code, 4)
 
     def test_validate_rejects_regular_file_path(self):
         with tempfile.TemporaryDirectory() as temp_dir:

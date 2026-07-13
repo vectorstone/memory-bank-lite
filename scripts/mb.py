@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 import sys
-from mb_lite.bank import initialize_bank, validate_bank
+from mb_lite.bank import initialize_project_bank, validate_bank
 from mb_lite.errors import MbError
 from mb_lite.identity import resolve_identity
 from mb_lite.recall import expand_result, search
@@ -38,7 +38,7 @@ def main(argv=None) -> int:
         if args.adopt:
             old = store.lookup(args.adopt); validate_bank(old.bank_path); entry = store.adopt(identity, args.adopt)
         else:
-            initialize_bank(store.bank_path(identity)); entry = store.register(identity)
+            initialize_project_bank(store.projects_root, identity.project_id); entry = store.register(identity)
         payload = {"repository_key": identity.key, "project_id": entry.project_id, "bank_path": str(entry.bank_path)}
         print(json.dumps(payload, ensure_ascii=False) if args.json else f"Initialized {entry.bank_path}"); return 0
     identity, bank = _bank(args, store); validate_bank(bank)

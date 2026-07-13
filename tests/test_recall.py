@@ -72,6 +72,21 @@ class RecallTests(unittest.TestCase):
             (bank / "progress.md").symlink_to(outside_note)
             self.assertEqual(search(bank, "registry"), [])
 
+    def test_symlinked_optional_directories_are_not_read(self):
+        for directory_name in ("notes", "plans"):
+            with self.subTest(directory_name=directory_name), tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as outside:
+                bank = Path(root) / ".memory-bank"
+                bank.mkdir()
+                outside_dir = Path(outside) / directory_name
+                outside_dir.mkdir()
+                (outside_dir / "secret.md").write_text(
+                    "# Secret\nregistry outside\n",
+                    encoding="utf-8",
+                )
+                (bank / directory_name).symlink_to(outside_dir, target_is_directory=True)
+
+                self.assertEqual(search(bank, "registry"), [])
+
 
 if __name__ == "__main__":
     unittest.main()

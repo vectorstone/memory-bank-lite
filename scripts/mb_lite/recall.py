@@ -5,6 +5,7 @@ import hashlib
 from pathlib import Path
 import re
 
+from .bank_fs import bank_markdown_files, read_bank_text
 from .errors import MbError
 
 
@@ -22,22 +23,18 @@ _TERM = re.compile(r"\w+", re.UNICODE)
 _SOURCES = ("progress.md", "backlog.md")
 
 
-def _files(bank: Path) -> list[Path]:
-    bank = bank.resolve()
-    files = [bank / name for name in _SOURCES]
-    for directory in (bank / "notes", bank / "plans", bank / "plans" / "done"):
-        if directory.is_dir() and not directory.is_symlink():
-            files.extend(sorted(directory.glob("*.md")))
-    accepted = []
-    for path in files:
-        if path.is_symlink() or not path.is_file():
-            continue
-        try:
-            path.resolve().relative_to(bank)
-        except ValueError:
-            continue
-        accepted.append(path)
-    return accepted
+def _files(bank: Path) -> list[tuple[str, str]]:
+    files: list[tuple[str, str]] = []
+    for name in _SOURCES:
+        content = read_bank_text(bank, name)
+        if content is not None:
+            files.append((name, content))
+    for directory in ("notes", "plans", "plans/done"):
+        files.extend(
+            (f"{directory}/{name}", content)
+            for name, content in bank_markdown_files(bank, directory)
+        )
+    return files
 
 
 def _chunks(text: str, filename: str) -> list[tuple[str, int, str]]:
@@ -67,11 +64,8 @@ def search(bank: Path, query: str) -> list[RecallResult]:
     if not terms:
         raise MbError("query must contain a term of at least two characters", 1)
     results: list[tuple[int, RecallResult]] = []
-    bank = Path(bank).resolve()
-    for path in _files(bank):
-        relative = path.relative_to(bank).as_posix()
-        text = path.read_text(encoding="utf-8")
-        for heading, offset, body in _chunks(text, path.name):
+    for relative, text in _files(bank):
+        for heading, offset, body in _chunks(text, relative.rsplit("/", 1)[-1]):
             haystack = (heading + "\n" + body).casefold()
             score = sum(haystack.count(term) for term in terms)
             if score:
@@ -81,11 +75,8 @@ def search(bank: Path, query: str) -> list[RecallResult]:
 
 
 def expand_result(bank: Path, result_id: str) -> RecallResult:
-    bank = Path(bank).resolve()
-    for path in _files(bank):
-        relative = path.relative_to(bank).as_posix()
-        text = path.read_text(encoding="utf-8")
-        for heading, offset, body in _chunks(text, path.name):
+    for relative, text in _files(bank):
+        for heading, offset, body in _chunks(text, relative.rsplit("/", 1)[-1]):
             if _result_id(relative, heading, offset) == result_id:
                 return RecallResult(
                     result_id,

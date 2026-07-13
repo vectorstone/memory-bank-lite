@@ -5,6 +5,8 @@ import subprocess
 import tempfile
 import unittest
 
+from scripts.mb_lite.identity import resolve_identity
+
 REPO = Path(__file__).resolve().parents[1]
 CLI = REPO / "scripts" / "mb.py"
 
@@ -28,6 +30,29 @@ class CliTest(unittest.TestCase):
             self.assertEqual(started.returncode, 0, started.stderr)
             self.assertIn("# Memory Bank", started.stdout)
             self.assertLessEqual(len(started.stdout.encode()), 8192)
+
+    def test_init_rejects_symlinked_project_parent_before_outside_write(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            repo = self._repo(root, "git@github.com:example/repo.git")
+            home = root / "memory"
+            outside = root / "outside"
+            outside.mkdir()
+            projects = home / "projects"
+            projects.mkdir(parents=True)
+            project_id = resolve_identity(repo).project_id
+            (projects / project_id).symlink_to(outside, target_is_directory=True)
+
+            result = subprocess.run(
+                ["python3", str(CLI), "--project-root", str(repo), "init"],
+                env={**os.environ, "MB_LITE_HOME": str(home)},
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 4, result.stderr)
+            self.assertFalse((outside / ".memory-bank").exists())
+            self.assertFalse((home / "registry.json").exists())
 
     def test_start_uninitialized_returns_exit_two(self):
         with tempfile.TemporaryDirectory() as d:

@@ -71,6 +71,47 @@ class StartTests(unittest.TestCase):
             self.assertLessEqual(len(output.encode()), 8192)
             self.assertIn("Older optional context was trimmed", output)
 
+    def test_optional_symlink_sources_never_disclose_outside_content(self):
+        scenarios = ("plans-directory", "plans-file", "notes-directory", "notes-file")
+        for scenario in scenarios:
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as root:
+                base = Path(root)
+                bank = self.make_bank(
+                    root,
+                    "**Focus:** Outside Secret\n",
+                    "- [ ] item\n",
+                    "",
+                )
+                outside = base / "outside"
+                outside.mkdir()
+                if scenario.startswith("plans"):
+                    secret = outside / "secret.md"
+                    secret.write_text(
+                        "### Stage 9: Outside Secret\n- [ ] disclose\n",
+                        encoding="utf-8",
+                    )
+                    if scenario == "plans-directory":
+                        for child in (bank / "plans" / "done").iterdir():
+                            child.unlink()
+                        (bank / "plans" / "done").rmdir()
+                        (bank / "plans").rmdir()
+                        (bank / "plans").symlink_to(outside, target_is_directory=True)
+                    else:
+                        (bank / "plans" / "secret.md").symlink_to(secret)
+                else:
+                    secret = outside / "secret.md"
+                    secret.write_text("# Outside Secret Note\n", encoding="utf-8")
+                    if scenario == "notes-directory":
+                        (bank / "notes").rmdir()
+                        (bank / "notes").symlink_to(outside, target_is_directory=True)
+                    else:
+                        (bank / "notes" / "secret.md").symlink_to(secret)
+
+                output = build_start_context(bank)
+
+                self.assertNotIn("Stage 9: Outside Secret", output)
+                self.assertNotIn("Outside Secret Note", output)
+
     def test_unknown_section(self):
         with tempfile.TemporaryDirectory() as root:
             bank = self.make_bank(root, "", "", "")

@@ -1,6 +1,8 @@
 from pathlib import Path
 import re
 
+from .bank import validate_bank
+from .bank_fs import bank_markdown_files, read_bank_text
 from .errors import MbError
 
 MAX_BYTES = 8192
@@ -28,11 +30,7 @@ def _focus(current: str) -> str:
 
 
 def _active_stage(bank: Path) -> tuple[str, str]:
-    plans = bank / "plans"
-    if not plans.is_dir():
-        return "", ""
-    for path in sorted(plans.glob("*.md"), reverse=True):
-        source = path.read_text(encoding="utf-8")
+    for _, source in reversed(bank_markdown_files(bank, "plans")):
         for match in STAGE_RE.finditer(source):
             if re.search(r"(?m)^\s*[-*]\s+\[\s\]\s+", match.group(2)):
                 return match.group(1).strip(), match.group(2).strip()
@@ -45,14 +43,12 @@ def _terms(value: str) -> tuple[str, ...]:
 
 def _note_titles(bank: Path, focus: str, stage_title: str) -> list[str]:
     terms = _terms(f"{focus} {stage_title}")
-    notes = bank / "notes"
-    if not terms or not notes.is_dir():
+    if not terms:
         return []
     result = []
-    for path in sorted(notes.glob("*.md")):
-        source = path.read_text(encoding="utf-8")
+    for name, source in bank_markdown_files(bank, "notes"):
         heading = re.search(r"(?m)^#\s+(.+)$", source)
-        title = heading.group(1).strip() if heading else path.stem
+        title = heading.group(1).strip() if heading else Path(name).stem
         if any(term in title.casefold() for term in terms):
             result.append(title)
         if len(result) == 5:
@@ -95,9 +91,10 @@ def _render(current, open_items, stage_title, stage_detail, recent, note_titles,
 
 def build_start_context(bank: Path, section: str | None = None) -> str:
     bank = Path(bank)
-    current = _current((bank / "status.md").read_text(encoding="utf-8"))
-    open_items = _open_items((bank / "checklist.md").read_text(encoding="utf-8"))
-    recent = _recent((bank / "progress.md").read_text(encoding="utf-8"))
+    validate_bank(bank)
+    current = _current(read_bank_text(bank, "status.md", required=True) or "")
+    open_items = _open_items(read_bank_text(bank, "checklist.md", required=True) or "")
+    recent = _recent(read_bank_text(bank, "progress.md", required=True) or "")
     stage_title, stage_detail = _active_stage(bank)
     note_titles = _note_titles(bank, _focus(current), stage_title)
     values = {

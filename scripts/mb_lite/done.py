@@ -10,16 +10,18 @@ import re
 import tempfile
 from typing import Any, Iterator
 
-from .bank import CORE_FILES
+from .bank import CORE_FILES, validate_bank
+from .bank_fs import read_bank_file, read_bank_text
 from .errors import MbError
 
 
 def bank_revision(bank: Path) -> str:
+    validate_bank(bank)
     digest = sha256()
     for name in CORE_FILES:
         digest.update(name.encode("utf-8"))
         digest.update(b"\0")
-        digest.update((bank / name).read_bytes())
+        digest.update(read_bank_file(bank, name, required=True) or b"")
         digest.update(b"\0")
     return digest.hexdigest()
 
@@ -263,7 +265,12 @@ class ApplyResult:
 @contextmanager
 def _bank_lock(bank: Path) -> Iterator[None]:
     lock_path = bank / ".mb-lite.lock"
-    with lock_path.open("a+", encoding="utf-8") as handle:
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+    except OSError as exc:
+        raise MbError(f"Bank lock acquisition failed: {exc}", 5) from exc
+    with os.fdopen(descriptor, "a+", encoding="utf-8") as handle:
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         except OSError as exc:
@@ -360,6 +367,7 @@ def _write_all_or_rollback(outputs: tuple[tuple[Path, str], ...]) -> None:
 
 
 def apply_done(bank: Path, repo: Path, payload: DonePayload, now: datetime) -> ApplyResult:
+    validate_bank(bank)
     _validate_key_files(repo, payload.key_files)
     timestamp = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with _bank_lock(bank):
@@ -369,12 +377,15 @@ def apply_done(bank: Path, repo: Path, payload: DonePayload, now: datetime) -> A
         status_path = bank / "status.md"
         checklist_path = bank / "checklist.md"
         progress_path = bank / "progress.md"
-        status = render_status(status_path.read_text(encoding="utf-8"), payload)
-        checklist = render_checklist(
-            checklist_path.read_text(encoding="utf-8"),
+        status = render_status(
+            read_bank_text(bank, "status.md", required=True) or "",
             payload,
         )
-        progress_source = progress_path.read_text(encoding="utf-8")
+        checklist = render_checklist(
+            read_bank_text(bank, "checklist.md", required=True) or "",
+            payload,
+        )
+        progress_source = read_bank_text(bank, "progress.md", required=True) or ""
         separator = "" if progress_source.endswith("\n") else "\n"
         progress = (
             progress_source
@@ -388,9 +399,14 @@ def apply_done(bank: Path, repo: Path, payload: DonePayload, now: datetime) -> A
         if payload.note is not None:
             note_relative = f"notes/{now:%Y-%m-%d}_{_slug(payload.note.title)}.md"
             note_target = bank / note_relative
+            notes_directory = note_target.parent
+            if notes_directory.is_symlink():
+                raise MbError(f"notes directory is not a real directory: {notes_directory}", 4)
+            if note_target.is_symlink():
+                raise MbError(f"note already exists: {note_relative}", 4)
             if note_target.exists():
                 raise MbError(f"note already exists: {note_relative}", 1)
-            note_target.parent.mkdir(parents=True, exist_ok=True)
+            notes_directory.mkdir(parents=True, exist_ok=True)
             note_content = f"# {payload.note.title}\n\n{payload.note.body.rstrip()}\n"
         outputs = [
             (status_path, status),
