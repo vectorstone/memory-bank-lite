@@ -42,7 +42,7 @@ after review of dry-run output.
 - Create: `scripts/mb_lite/migration.py`
 - Create: `tests/test_migration.py`
 
-- [ ] **Step 1: Write failing legacy inventory tests**
+- [x] **Step 1: Write failing legacy inventory tests**
 
 ```python
 from pathlib import Path
@@ -103,13 +103,13 @@ class MigrationTest(unittest.TestCase):
                 plan_migration(root, root / "central")
 ```
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run: `python3 -m unittest tests.test_migration -v`
 
 Expected: `ModuleNotFoundError: No module named 'scripts.mb_lite.migration'`.
 
-- [ ] **Step 3: Implement inventory, full-tree digest, and merge planning**
+- [x] **Step 3: Implement inventory, full-tree digest, and merge planning**
 
 Create `scripts/mb_lite/migration.py`:
 
@@ -198,13 +198,13 @@ def plan_migration(home: Path, central_home: Path) -> MigrationPlan:
     return MigrationPlan(planned, registries)
 ```
 
-- [ ] **Step 4: Run the tests and verify GREEN**
+- [x] **Step 4: Run the tests and verify GREEN**
 
 Run: `python3 -m unittest tests.test_migration -v`
 
 Expected: `Ran 3 tests` and `OK`.
 
-- [ ] **Step 5: Commit migration planning**
+- [x] **Step 5: Commit migration planning**
 
 ```bash
 git add scripts/mb_lite/migration.py tests/test_migration.py
@@ -217,7 +217,7 @@ git commit -m "feat: plan legacy memory migration"
 - Create: `scripts/mb_lite/cleanup.py`
 - Create: `tests/test_cleanup.py`
 
-- [ ] **Step 1: Write failing marker and JSON cleanup tests**
+- [x] **Step 1: Write failing marker and JSON cleanup tests**
 
 ```python
 from pathlib import Path
@@ -261,13 +261,13 @@ class CleanupTest(unittest.TestCase):
         self.assertEqual(cleaned, {"plugin": ["user-plugin"], "theme": "dark"})
 ```
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run: `python3 -m unittest tests.test_cleanup -v`
 
 Expected: `ModuleNotFoundError: No module named 'scripts.mb_lite.cleanup'`.
 
-- [ ] **Step 3: Implement paired-marker and hook ownership transforms**
+- [x] **Step 3: Implement paired-marker and hook ownership transforms**
 
 Create `scripts/mb_lite/cleanup.py`:
 
@@ -348,7 +348,7 @@ def remove_opencode_plugin(source: dict[str, Any], plugin_ref: str) -> dict[str,
     return result
 ```
 
-- [ ] **Step 4: Add project manifest containment tests and implementation**
+- [x] **Step 4: Add project manifest containment tests and implementation**
 
 Replace the cleanup import at module scope with these imports:
 
@@ -401,7 +401,7 @@ def manifest_owned_files(project: Path, manifest: Path) -> tuple[Path, ...]:
     return tuple(result)
 ```
 
-- [ ] **Step 5: Run tests and commit cleanup transforms**
+- [x] **Step 5: Run tests and commit cleanup transforms**
 
 Run: `python3 -m unittest tests.test_cleanup -v`
 
@@ -418,7 +418,7 @@ git commit -m "feat: add ownership-safe cleanup transforms"
 - Create: `scripts/mb_lite/transaction.py`
 - Create: `tests/test_transaction.py`
 
-- [ ] **Step 1: Write failing backup and rollback test**
+- [x] **Step 1: Write failing backup and rollback test**
 
 ```python
 from pathlib import Path
@@ -464,13 +464,13 @@ class TransactionTest(unittest.TestCase):
             self.assertEqual(link.resolve(), source.resolve())
 ```
 
-- [ ] **Step 2: Run the test and verify RED**
+- [x] **Step 2: Run the test and verify RED**
 
 Run: `python3 -m unittest tests.test_transaction -v`
 
 Expected: `ModuleNotFoundError: No module named 'scripts.mb_lite.transaction'`.
 
-- [ ] **Step 3: Implement transaction manifests and rollback**
+- [x] **Step 3: Implement transaction manifests and rollback**
 
 Create `scripts/mb_lite/transaction.py`:
 
@@ -555,13 +555,13 @@ class BackupTransaction:
                 path.unlink()
 ```
 
-- [ ] **Step 4: Run the test and verify GREEN**
+- [x] **Step 4: Run the test and verify GREEN**
 
 Run: `python3 -m unittest tests.test_transaction -v`
 
 Expected: `Ran 2 tests` and `OK`.
 
-- [ ] **Step 5: Commit backup transactions**
+- [x] **Step 5: Commit backup transactions**
 
 ```bash
 git add scripts/mb_lite/transaction.py tests/test_transaction.py
@@ -576,7 +576,7 @@ git commit -m "feat: add migration rollback transactions"
 - Create: `commands/mb.md`
 - Create: `tests/test_install.py`
 
-- [ ] **Step 1: Write failing isolated-HOME installer tests**
+- [x] **Step 1: Write failing isolated-HOME installer tests**
 
 ```python
 from pathlib import Path
@@ -616,13 +616,13 @@ class InstallTest(unittest.TestCase):
             self.assertFalse((home / ".agents/skills/mb").exists())
 ```
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run: `python3 -m unittest tests.test_install -v`
 
 Expected: both tests fail because `install.sh` and `uninstall.sh` do not exist.
 
-- [ ] **Step 3: Create the thin command wrapper**
+- [x] **Step 3: Create the thin command wrapper**
 
 Create `commands/mb.md` with six lines:
 
@@ -634,7 +634,7 @@ Load the `mb` skill and execute this action: $ARGUMENTS
 Do not run any Memory Bank action implicitly.
 ```
 
-- [ ] **Step 4: Implement source-only installation**
+- [x] **Step 4: Implement source-only installation**
 
 Create executable `install.sh`:
 
@@ -672,7 +672,7 @@ acceptance task verifies that OpenCode 1.4.10 exposes the installed
 `slash: true` skill directly as `/mb`; failure is an acceptance blocker rather
 than permission to add a second skill copy.
 
-- [ ] **Step 5: Implement ownership-safe uninstall**
+- [x] **Step 5: Implement ownership-safe uninstall**
 
 Create executable `uninstall.sh`:
 
@@ -704,7 +704,7 @@ remove_wrapper "$HOME/.claude/commands/mb.md"
 echo "mb integration removed; registry and Banks preserved"
 ```
 
-- [ ] **Step 6: Run tests and commit source installation**
+- [x] **Step 6: Run tests and commit source installation**
 
 Run: `chmod +x install.sh uninstall.sh && python3 -m unittest tests.test_install -v`
 
@@ -723,7 +723,7 @@ git commit -m "feat: install memory skill from source"
 - Create: `tests/test_migration_e2e.py`
 - Modify: `scripts/mb_lite/registry.py`
 
-- [ ] **Step 1: Write a failing end-to-end dry-run and rollback test**
+- [x] **Step 1: Write a failing end-to-end dry-run and rollback test**
 
 ```python
 from pathlib import Path
@@ -795,13 +795,13 @@ class MigrationE2ETest(unittest.TestCase):
             self.assertEqual(opencode.read_bytes(), opencode_before)
 ```
 
-- [ ] **Step 2: Run the test and verify RED**
+- [x] **Step 2: Run the test and verify RED**
 
 Run: `python3 -m unittest tests.test_migration_e2e -v`
 
 Expected: the test fails because `migrate-cleanup.sh` does not exist.
 
-- [ ] **Step 3: Add a public registry replacement method**
+- [x] **Step 3: Add a public registry replacement method**
 
 Add to `RegistryStore` in `scripts/mb_lite/registry.py`:
 
@@ -815,7 +815,7 @@ def replace_projects(self, projects: dict[str, dict[str, object]]) -> None:
         self._write(current)
 ```
 
-- [ ] **Step 4: Implement the migration CLI with dry-run default**
+- [x] **Step 4: Implement the migration CLI with dry-run default**
 
 Create `scripts/migrate_cleanup.py` with this complete implementation:
 
@@ -1097,7 +1097,7 @@ if __name__ == "__main__":
         raise SystemExit(exc.exit_code)
 ```
 
-- [ ] **Step 5: Create the Bash entry point**
+- [x] **Step 5: Create the Bash entry point**
 
 Create executable `migrate-cleanup.sh`:
 
@@ -1108,7 +1108,7 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 exec python3 "$ROOT/scripts/migrate_cleanup.py" "$@"
 ```
 
-- [ ] **Step 6: Run migration tests and commit orchestration**
+- [x] **Step 6: Run migration tests and commit orchestration**
 
 Run:
 
@@ -1131,7 +1131,7 @@ git commit -m "feat: migrate and clean legacy memory installs"
 **Files:**
 - Create: `docs/local-acceptance.md`
 
-- [ ] **Step 1: Write the acceptance runbook with exact non-destructive checks**
+- [x] **Step 1: Write the acceptance runbook with exact non-destructive checks**
 
 Create `docs/local-acceptance.md` with these commands and expected facts:
 
@@ -1183,7 +1183,7 @@ Run `bash migrate-cleanup.sh --rollback TRANSACTION_ID` only if acceptance fails
 Rollback restores configuration and registration files but leaves Bank content.
 ```
 
-- [ ] **Step 2: Verify the runbook contains every approved acceptance criterion**
+- [x] **Step 2: Verify the runbook contains every approved acceptance criterion**
 
 Run:
 
@@ -1193,14 +1193,14 @@ rg -n "dry-run|explicitly approved|Codex|Claude Code|OpenCode|8192|decline|confi
 
 Expected: each term appears in the matching numbered section.
 
-- [ ] **Step 3: Commit the acceptance runbook**
+- [x] **Step 3: Commit the acceptance runbook**
 
 ```bash
 git add docs/local-acceptance.md
 git commit -m "docs: add local memory acceptance runbook"
 ```
 
-- [ ] **Step 4: Execute dry-run only and pause for approval**
+- [x] **Step 4: Execute dry-run only and pause for approval**
 
 Run: `bash migrate-cleanup.sh > /tmp/mb-lite-dry-run.txt`
 
