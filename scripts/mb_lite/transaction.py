@@ -100,13 +100,23 @@ def _record_path(value: object) -> Path:
     return path
 
 
-def _validate_record_parent(record: dict[str, object], path: Path) -> None:
+def _validate_record_parent(record: dict[str, object], path: Path) -> Path:
     raw_parent = record.get("parent")
     if not isinstance(raw_parent, str) or not raw_parent or "\0" in raw_parent:
         raise ValueError("invalid record parent")
     parent = Path(raw_parent)
-    if not parent.is_absolute() or path.parent.resolve() != parent:
+    if not parent.is_absolute():
         raise ValueError("rollback destination ancestry changed")
+    if path.parent.resolve() == parent:
+        return path
+    if (
+        path.parent.exists()
+        or path.parent.is_symlink()
+        or parent.is_symlink()
+        or not parent.is_dir()
+    ):
+        raise ValueError("rollback destination ancestry changed")
+    return parent / path.name
 
 
 def _backup_content(directory: Path, record: dict[str, object]) -> bytes:
@@ -166,7 +176,7 @@ def _validated_records(directory: Path) -> tuple[RollbackRecord, ...]:
             raise ValueError("invalid rollback record")
         kind = raw_record.get("kind")
         path = _record_path(raw_record.get("path"))
-        _validate_record_parent(raw_record, path)
+        path = _validate_record_parent(raw_record, path)
         action = raw_record.get("action")
         if not isinstance(action, str) or not action:
             raise ValueError("invalid rollback action")

@@ -131,6 +131,29 @@ class TransactionTest(unittest.TestCase):
             self.assertEqual(victim.read_bytes(), b"outside-victim\n")
             self.assertEqual(secondary.read_bytes(), b"secondary-changed\n")
 
+    def test_rollback_restores_file_captured_through_removed_symlink_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state"
+            source = root / "source"
+            source.mkdir()
+            owned = source / "owned.json"
+            owned.write_bytes(b"original\n")
+            link = root / "installed"
+            link.symlink_to(source, target_is_directory=True)
+            transaction = BackupTransaction.create(state, "removed-link-parent")
+            transaction.capture(link / "owned.json", "restore owned manifest")
+            transaction.capture(link, "restore skill link")
+            transaction.finish()
+            owned.unlink()
+            link.unlink()
+
+            BackupTransaction.rollback(transaction.directory)
+
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(link.resolve(), source.resolve())
+            self.assertEqual(owned.read_bytes(), b"original\n")
+
     def test_rollback_rejects_manifest_only_destination_tampering(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

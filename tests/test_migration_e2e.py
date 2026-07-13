@@ -16,7 +16,13 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 from mb_lite.errors import MbError  # noqa: E402
 from mb_lite.migration import plan_migration  # noqa: E402
-from migrate_cleanup import _apply, _cleanup_actions, _copy_banks  # noqa: E402
+from migrate_cleanup import (  # noqa: E402
+    CleanupAction,
+    _apply,
+    _cleanup_actions,
+    _copy_banks,
+    _prepare_mutations,
+)
 
 
 class MigrationEndToEndTest(unittest.TestCase):
@@ -618,6 +624,30 @@ class MigrationEndToEndTest(unittest.TestCase):
         self.assertEqual(
             (target / ".pre-migrate-20260421" / "snapshot.md").read_bytes(),
             prefixed.read_bytes(),
+        )
+
+    def test_cleanup_orders_owned_file_before_ancestor_symlink(self) -> None:
+        source = self.home / "legacy-skill"
+        source.mkdir()
+        manifest = source / ".installed-manifest.json"
+        manifest.write_text("{}\n", encoding="utf-8")
+        link = self.home / ".claude/skills/memory-bank"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(source, target_is_directory=True)
+        actions = (
+            CleanupAction("remove-owned", link, "owned skill link"),
+            CleanupAction(
+                "remove-owned",
+                link / ".installed-manifest.json",
+                "consumed ownership manifest",
+            ),
+        )
+
+        mutations = _prepare_mutations(actions, self.central / "registry.json")
+
+        self.assertEqual(
+            [mutation.path for mutation in mutations],
+            [link / ".installed-manifest.json", link],
         )
 
     def test_bank_final_placement_symlink_race_cannot_write_outside(self) -> None:

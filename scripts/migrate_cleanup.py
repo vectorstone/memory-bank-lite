@@ -732,7 +732,10 @@ def _prepare_mutations(
             continue
         grouped.setdefault(str(action.path.resolve()), []).append(action)
     prepared: list[PreparedMutation] = []
-    for resolved_path in sorted(grouped):
+    for resolved_path in sorted(
+        grouped,
+        key=lambda value: (-len(Path(value).parts), value),
+    ):
         path_actions = grouped[resolved_path]
         path = path_actions[0].path
         kinds = {action.kind for action in path_actions}
