@@ -195,6 +195,11 @@ class MigrationEndToEndTest(unittest.TestCase):
         nested = unresolved_bank / "notes" / "evidence.bin"
         nested.parent.mkdir()
         nested.write_bytes(b"unresolved-bank-bytes\x00\xff")
+        outside_target = self.home / "outside-target.bin"
+        outside_target.write_bytes(b"outside-target-bytes\x00\xff")
+        escaping_link = nested.parent / "outside-link"
+        escaping_link.symlink_to(outside_target)
+        escaping_link_anchored = escaping_link.parent.resolve() / escaping_link.name
         unrelated_owned = self.home / ".claude/agents/unrelated-owned.md"
         unrelated_owned.parent.mkdir(parents=True)
         unrelated_owned.write_text("managed unrelated artifact\n", encoding="utf-8")
@@ -215,12 +220,14 @@ class MigrationEndToEndTest(unittest.TestCase):
                     str(self.legacy_registry),
                     str(unresolved_bank / "status.md"),
                     str(nested),
+                    str(escaping_link),
                     str(unrelated_owned),
                 ],
             },
         )
         self.env["MB_LEGACY_MANIFEST"] = str(legacy_manifest)
         registry_before = self.legacy_registry.read_bytes()
+        outside_target_before = outside_target.read_bytes()
         unresolved_before = {
             path.relative_to(unresolved_bank): path.read_bytes()
             for path in unresolved_bank.rglob("*")
@@ -251,6 +258,10 @@ class MigrationEndToEndTest(unittest.TestCase):
             f"remove-owned: {nested.resolve()}",
             first_dry_run.stdout,
         )
+        self.assertNotIn(
+            f"remove-owned: {escaping_link_anchored}",
+            first_dry_run.stdout,
+        )
         self.assertIn(
             f"remove-owned: {unrelated_owned.resolve()}",
             first_dry_run.stdout,
@@ -272,6 +283,9 @@ class MigrationEndToEndTest(unittest.TestCase):
         self.assertEqual(tuple(projects), ("github.com/example/repo",))
         self.assertEqual(self.legacy_registry.read_bytes(), registry_before)
         self.assertFalse(unrelated_owned.exists())
+        self.assertTrue(escaping_link.is_symlink())
+        self.assertEqual(escaping_link.readlink(), outside_target)
+        self.assertEqual(outside_target.read_bytes(), outside_target_before)
         self.assertEqual(
             {
                 path.relative_to(unresolved_bank): path.read_bytes()
@@ -287,6 +301,9 @@ class MigrationEndToEndTest(unittest.TestCase):
         self.assertFalse((self.central / "registry.json").exists())
         self.assertTrue(target_bank.is_dir())
         self.assertEqual(self.legacy_registry.read_bytes(), registry_before)
+        self.assertTrue(escaping_link.is_symlink())
+        self.assertEqual(escaping_link.readlink(), outside_target)
+        self.assertEqual(outside_target.read_bytes(), outside_target_before)
         self.assertEqual(
             {
                 path.relative_to(unresolved_bank): path.read_bytes()

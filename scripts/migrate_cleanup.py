@@ -139,21 +139,25 @@ def _shared_paths(root: Path, relatives: tuple[str, ...]) -> frozenset[Path]:
     return frozenset((root / relative).resolve() for relative in relatives)
 
 
+def _anchored_path(path: Path) -> Path:
+    return path.parent.resolve() / path.name
+
+
 def _is_manifest_protected(
     path: Path,
     protected_paths: frozenset[Path],
     protected_roots: tuple[Path, ...],
 ) -> bool:
-    resolved = path.resolve()
-    if resolved in protected_paths:
+    anchored = _anchored_path(path)
+    if anchored in protected_paths:
         return True
     for root in protected_roots:
         try:
-            resolved.relative_to(root)
+            anchored.relative_to(root)
         except ValueError:
             continue
         return True
-    return False
+    return path.resolve() in protected_paths
 
 
 def _manifest_actions(
@@ -215,7 +219,7 @@ def _cleanup_actions(home: Path, plan: MigrationPlan) -> tuple[CleanupAction, ..
     actions: list[CleanupAction] = []
     global_shared = _shared_paths(home, GLOBAL_SHARED_FILES)
     retained_registries = frozenset(
-        path.resolve() for path in plan.retained_legacy_registries
+        _anchored_path(path) for path in plan.retained_legacy_registries
     )
     unresolved_banks = tuple(
         sorted(
