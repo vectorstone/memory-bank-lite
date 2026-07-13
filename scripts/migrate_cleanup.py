@@ -221,6 +221,10 @@ def _cleanup_actions(home: Path, plan: MigrationPlan) -> tuple[CleanupAction, ..
     retained_registries = frozenset(
         _anchored_path(path) for path in plan.retained_legacy_registries
     )
+    unresolved_bank_locators = frozenset(
+        _anchored_path(record.bank_path) for record in plan.unresolved_records
+    )
+    legacy_protected_paths = retained_registries | unresolved_bank_locators
     unresolved_banks = tuple(
         sorted(
             {record.bank_path.resolve() for record in plan.unresolved_records},
@@ -251,7 +255,7 @@ def _cleanup_actions(home: Path, plan: MigrationPlan) -> tuple[CleanupAction, ..
                     _manifest_actions(
                         root,
                         manifest,
-                        project_shared | retained_registries,
+                        project_shared | legacy_protected_paths,
                         unresolved_banks,
                     ),
                 )
@@ -260,7 +264,7 @@ def _cleanup_actions(home: Path, plan: MigrationPlan) -> tuple[CleanupAction, ..
             _manifest_actions(
                 home,
                 manifest,
-                global_shared | retained_registries,
+                global_shared | legacy_protected_paths,
                 unresolved_banks,
             ),
         )
@@ -270,7 +274,7 @@ def _cleanup_actions(home: Path, plan: MigrationPlan) -> tuple[CleanupAction, ..
             _manifest_actions(
                 home,
                 cursor_manifest,
-                global_shared | retained_registries,
+                global_shared | legacy_protected_paths,
                 unresolved_banks,
             ),
         )

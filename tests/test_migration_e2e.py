@@ -190,8 +190,12 @@ class MigrationEndToEndTest(unittest.TestCase):
 
     def test_mixed_registry_migrates_valid_record_and_retains_unresolved_record(self) -> None:
         missing_root = self.home / "removed-project"
-        unresolved_bank = self.home / "unresolved-bank" / ".memory-bank"
-        self._copy_bank(unresolved_bank, prefix="unresolved")
+        unresolved_bank_target = self.home / "unresolved-bank-target" / ".memory-bank"
+        self._copy_bank(unresolved_bank_target, prefix="unresolved")
+        unresolved_bank = self.home / "unresolved-bank-link" / ".memory-bank"
+        unresolved_bank.parent.mkdir()
+        unresolved_bank.symlink_to(unresolved_bank_target, target_is_directory=True)
+        unresolved_bank_anchored = unresolved_bank.parent.resolve() / unresolved_bank.name
         nested = unresolved_bank / "notes" / "evidence.bin"
         nested.parent.mkdir()
         nested.write_bytes(b"unresolved-bank-bytes\x00\xff")
@@ -218,6 +222,7 @@ class MigrationEndToEndTest(unittest.TestCase):
             {
                 "files": [
                     str(self.legacy_registry),
+                    str(unresolved_bank),
                     str(unresolved_bank / "status.md"),
                     str(nested),
                     str(escaping_link),
@@ -227,10 +232,11 @@ class MigrationEndToEndTest(unittest.TestCase):
         )
         self.env["MB_LEGACY_MANIFEST"] = str(legacy_manifest)
         registry_before = self.legacy_registry.read_bytes()
+        unresolved_bank_link_before = unresolved_bank.readlink()
         outside_target_before = outside_target.read_bytes()
         unresolved_before = {
-            path.relative_to(unresolved_bank): path.read_bytes()
-            for path in unresolved_bank.rglob("*")
+            path.relative_to(unresolved_bank_target): path.read_bytes()
+            for path in unresolved_bank_target.rglob("*")
             if path.is_file()
         }
         before = self._file_bytes()
@@ -251,6 +257,10 @@ class MigrationEndToEndTest(unittest.TestCase):
             first_dry_run.stdout,
         )
         self.assertNotIn(
+            f"remove-owned: {unresolved_bank_anchored}",
+            first_dry_run.stdout,
+        )
+        self.assertNotIn(
             f"remove-owned: {(unresolved_bank / 'status.md').resolve()}",
             first_dry_run.stdout,
         )
@@ -267,6 +277,8 @@ class MigrationEndToEndTest(unittest.TestCase):
             first_dry_run.stdout,
         )
         self.assertEqual(self._file_bytes(), before)
+        self.assertTrue(unresolved_bank.is_symlink())
+        self.assertEqual(unresolved_bank.readlink(), unresolved_bank_link_before)
         self.assertFalse((self.home / ".local/state/mb-migration").exists())
 
         applied = self._run("--apply", "--timestamp", "mixed-registry")
@@ -283,13 +295,15 @@ class MigrationEndToEndTest(unittest.TestCase):
         self.assertEqual(tuple(projects), ("github.com/example/repo",))
         self.assertEqual(self.legacy_registry.read_bytes(), registry_before)
         self.assertFalse(unrelated_owned.exists())
+        self.assertTrue(unresolved_bank.is_symlink())
+        self.assertEqual(unresolved_bank.readlink(), unresolved_bank_link_before)
         self.assertTrue(escaping_link.is_symlink())
         self.assertEqual(escaping_link.readlink(), outside_target)
         self.assertEqual(outside_target.read_bytes(), outside_target_before)
         self.assertEqual(
             {
-                path.relative_to(unresolved_bank): path.read_bytes()
-                for path in unresolved_bank.rglob("*")
+                path.relative_to(unresolved_bank_target): path.read_bytes()
+                for path in unresolved_bank_target.rglob("*")
                 if path.is_file()
             },
             unresolved_before,
@@ -301,13 +315,15 @@ class MigrationEndToEndTest(unittest.TestCase):
         self.assertFalse((self.central / "registry.json").exists())
         self.assertTrue(target_bank.is_dir())
         self.assertEqual(self.legacy_registry.read_bytes(), registry_before)
+        self.assertTrue(unresolved_bank.is_symlink())
+        self.assertEqual(unresolved_bank.readlink(), unresolved_bank_link_before)
         self.assertTrue(escaping_link.is_symlink())
         self.assertEqual(escaping_link.readlink(), outside_target)
         self.assertEqual(outside_target.read_bytes(), outside_target_before)
         self.assertEqual(
             {
-                path.relative_to(unresolved_bank): path.read_bytes()
-                for path in unresolved_bank.rglob("*")
+                path.relative_to(unresolved_bank_target): path.read_bytes()
+                for path in unresolved_bank_target.rglob("*")
                 if path.is_file()
             },
             unresolved_before,
