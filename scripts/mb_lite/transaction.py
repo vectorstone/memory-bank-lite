@@ -3,8 +3,16 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import tempfile
 
 from .errors import MbError
+
+
+def _unlink_if_present(path: str) -> None:
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return
 
 
 @dataclass
@@ -35,7 +43,10 @@ class BackupTransaction:
         data = path.read_bytes()
         name = f"{len(self.records):04d}-{path.name}"
         backup = self.directory / name
-        backup.write_bytes(data)
+        with backup.open("wb") as backup_file:
+            backup_file.write(data)
+            backup_file.flush()
+            os.fsync(backup_file.fileno())
         self.records.append(
             {
                 "path": str(path),
@@ -58,15 +69,32 @@ class BackupTransaction:
         )
 
     def finish(self) -> None:
-        (self.directory / "manifest.json").write_text(
-            json.dumps(
-                {"version": 1, "records": self.records},
-                ensure_ascii=False,
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
+        content = json.dumps(
+            {"version": 1, "records": self.records},
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n"
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=self.directory,
+            prefix=".manifest.",
+            suffix=".tmp",
         )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as temporary:
+                temporary.write(content)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary_name, self.directory / "manifest.json")
+            directory = os.open(
+                self.directory,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            _unlink_if_present(temporary_name)
 
     @staticmethod
     def rollback(directory: Path) -> None:

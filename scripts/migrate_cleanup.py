@@ -53,8 +53,20 @@ class CleanupAction:
     plugin_ref: str | None = None
 
 
+@dataclass(frozen=True)
+class PreparedMutation:
+    path: Path
+    detail: str
+    replacement: str | None
+
+
+class MigrationArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise MbError(message, 1)
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="migrate-cleanup.sh")
+    parser = MigrationArgumentParser(prog="mb migration")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--apply", action="store_true")
     mode.add_argument("--rollback", metavar="ID")
@@ -77,7 +89,19 @@ def _load_object(path: Path, label: str) -> dict[str, Any]:
 
 
 def _is_shared_path(path: Path) -> bool:
-    return path.name in {"AGENTS.md", "CLAUDE.md", "settings.json", "opencode.json"}
+    name = path.name.lower()
+    return (
+        name in {
+            "agents.md",
+            "claude.md",
+            "hooks.json",
+            "opencode.json",
+            "settings.json",
+        }
+        or "instructions" in name
+        or "prompt" in name
+        or "rules" in name
+    )
 
 
 def _manifest_actions(
@@ -239,11 +263,30 @@ def _merged_projects(store: RegistryStore, plan: MigrationPlan) -> dict[str, obj
     projects = dict(cast(dict[str, object], existing["projects"]))
     for key in sorted(plan.projects):
         project = plan.projects[key]
+        source_digest = tree_digest(project.source_banks[0])
+        if project.target_bank.exists() or project.target_bank.is_symlink():
+            validate_bank(project.target_bank)
+            if tree_digest(project.target_bank) != source_digest:
+                raise MbError(
+                    f"target Bank has different content: {project.target_bank}",
+                    4,
+                )
+        known_roots = {str(root) for root in project.known_roots}
+        current = projects.get(key)
+        if current is not None:
+            current_entry = store._entry(current)
+            validate_bank(current_entry.bank_path)
+            if tree_digest(current_entry.bank_path) != source_digest:
+                raise MbError(
+                    f"existing registry Bank has different content: {current_entry.bank_path}",
+                    4,
+                )
+            known_roots.update(current_entry.known_roots)
         projects[key] = {
             "project_id": project.identity.project_id,
             "remote": key if project.identity.remote else None,
             "bank_path": str(project.target_bank),
-            "known_roots": [str(root) for root in project.known_roots],
+            "known_roots": sorted(known_roots),
         }
     return projects
 
@@ -255,42 +298,80 @@ def _capture(transaction: BackupTransaction, path: Path, action: str) -> None:
         transaction.capture_missing(path, action)
 
 
-def _apply_action(transaction: BackupTransaction, action: CleanupAction) -> None:
-    path = action.path
-    if action.kind == "strip-blocks":
-        try:
-            source = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError) as exc:
-            raise MbError(f"unable to read instruction file: {path}", 4) from exc
-        cleaned, changed = strip_known_blocks(source)
-        if changed:
-            transaction.capture(path, action.detail)
-            _atomic_write_text(path, cleaned)
-        return
-    if action.kind in {"clean-hooks", "opencode-plugin"}:
+def _prepare_mutations(
+    actions: tuple[CleanupAction, ...],
+    registry_path: Path,
+) -> tuple[PreparedMutation, ...]:
+    grouped: dict[str, list[CleanupAction]] = {}
+    for action in actions:
+        if action.path.resolve() == registry_path.resolve():
+            continue
+        grouped.setdefault(str(action.path.resolve()), []).append(action)
+    prepared: list[PreparedMutation] = []
+    for resolved_path in sorted(grouped):
+        path_actions = grouped[resolved_path]
+        path = path_actions[0].path
+        kinds = {action.kind for action in path_actions}
+        detail = ", ".join(sorted({action.detail for action in path_actions}))
+        if "remove-owned" in kinds:
+            if len(kinds) != 1:
+                raise MbError(f"conflicting cleanup actions for {path}", 4)
+            if path.is_symlink() or path.is_file():
+                prepared.append(PreparedMutation(path, detail, None))
+            elif path.is_dir():
+                raise MbError(f"refusing to remove non-symlink directory: {path}", 4)
+            continue
+        if kinds == {"strip-blocks"}:
+            try:
+                source = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise MbError(f"unable to read instruction file: {path}", 4) from exc
+            cleaned, changed = strip_known_blocks(source)
+            if changed:
+                prepared.append(PreparedMutation(path, detail, cleaned))
+            continue
+        if not kinds.issubset({"clean-hooks", "opencode-plugin"}):
+            raise MbError(f"unknown cleanup action for {path}", 4)
         source = _load_object(path, "configuration")
-        cleaned = (
-            clean_hooks_json(source)
-            if action.kind == "clean-hooks"
-            else remove_opencode_plugin(source, action.plugin_ref or "")
-        )
+        cleaned = source
+        for action in path_actions:
+            if action.kind == "clean-hooks":
+                cleaned = clean_hooks_json(cleaned)
+            else:
+                cleaned = remove_opencode_plugin(cleaned, action.plugin_ref or "")
         if cleaned != source:
-            transaction.capture(path, action.detail)
-            _atomic_write_text(
-                path,
-                json.dumps(cleaned, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            prepared.append(
+                PreparedMutation(
+                    path,
+                    detail,
+                    json.dumps(cleaned, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                ),
             )
+    return tuple(prepared)
+
+
+def _apply_mutation(mutation: PreparedMutation) -> None:
+    if mutation.replacement is not None:
+        _atomic_write_text(mutation.path, mutation.replacement)
         return
-    if action.kind != "remove-owned":
-        raise MbError(f"unknown cleanup action: {action.kind}", 4)
-    if path.is_symlink():
-        transaction.capture(path, action.detail)
-        path.unlink()
-    elif path.is_dir():
-        raise MbError(f"refusing to remove non-symlink directory: {path}", 4)
-    elif path.exists():
-        transaction.capture(path, action.detail)
-        path.unlink()
+    try:
+        mutation.path.unlink()
+    except OSError as exc:
+        raise MbError(f"unable to remove owned path: {mutation.path}: {exc}", 4) from exc
+
+
+def _capture_transaction(
+    transaction: BackupTransaction,
+    registry_path: Path,
+    mutations: tuple[PreparedMutation, ...],
+) -> None:
+    try:
+        _capture(transaction, registry_path, "replace central registry")
+        for mutation in mutations:
+            transaction.capture(mutation.path, mutation.detail)
+        transaction.finish()
+    except (OSError, MbError) as exc:
+        raise MbError(f"unable to prepare migration transaction: {exc}", 4) from exc
 
 
 def _apply(
@@ -303,22 +384,17 @@ def _apply(
     store = RegistryStore(central_home)
     registry_path = store.path
     projects = _merged_projects(store, plan)
-    for action in actions:
-        if action.kind == "remove-owned" and action.path.is_dir() and not action.path.is_symlink():
-            raise MbError(f"refusing to remove non-symlink directory: {action.path}", 4)
+    mutations = _prepare_mutations(actions, registry_path)
     try:
         transaction = BackupTransaction.create(state_root, transaction_id)
     except OSError as exc:
         raise MbError(f"unable to create migration transaction: {exc}", 4) from exc
+    _capture_transaction(transaction, registry_path, mutations)
     try:
         _copy_banks(plan)
-        _capture(transaction, registry_path, "replace central registry")
         store.replace_projects(projects)
-        for action in actions:
-            if action.path.resolve() == registry_path.resolve():
-                continue
-            _apply_action(transaction, action)
-        transaction.finish()
+        for mutation in mutations:
+            _apply_mutation(mutation)
     except MbError:
         _rollback_failed_apply(transaction)
         raise
@@ -329,7 +405,6 @@ def _apply(
 
 def _rollback_failed_apply(transaction: BackupTransaction) -> None:
     try:
-        transaction.finish()
         BackupTransaction.rollback(transaction.directory)
     except (KeyError, OSError, TypeError, MbError) as exc:
         raise MbError(f"unable to roll back failed migration: {exc}", 4) from exc
@@ -379,5 +454,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except MbError as exc:
-        print(f"migrate-cleanup: {exc}", file=sys.stderr)
+        print(f"mb migration: {exc}", file=sys.stderr)
         raise SystemExit(exc.exit_code)

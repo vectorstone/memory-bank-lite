@@ -3,13 +3,20 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 REPO = Path(__file__).resolve().parents[1]
 MIGRATE = REPO / "migrate-cleanup.sh"
 MANAGED_PLUGIN = "./.opencode/plugins/memory-bank.js"
+sys.path.insert(0, str(REPO / "scripts"))
+
+from mb_lite.errors import MbError  # noqa: E402
+from mb_lite.migration import plan_migration  # noqa: E402
+from migrate_cleanup import _apply, _cleanup_actions  # noqa: E402
 
 
 class MigrationEndToEndTest(unittest.TestCase):
@@ -107,6 +114,27 @@ class MigrationEndToEndTest(unittest.TestCase):
             if path.is_file() and ".git" not in path.parts
         }
 
+    def _target_bank(self) -> Path:
+        project_id = "repo-" + sha256(
+            b"github.com/example/repo",
+        ).hexdigest()[:12]
+        return self.central / "projects" / project_id / ".memory-bank"
+
+    def _copy_bank(self, target: Path, prefix: str = "legacy") -> None:
+        target.mkdir(parents=True)
+        for name in ("status.md", "checklist.md", "progress.md"):
+            (target / name).write_text(f"# {prefix} {name}\n", encoding="utf-8")
+
+    def _write_central_registry(self, projects: dict[str, object]) -> None:
+        self._write_json(
+            self.central / "registry.json",
+            {
+                "version": 1,
+                "projects_root": str(self.central.resolve() / "projects"),
+                "projects": projects,
+            },
+        )
+
     def test_dry_run_apply_and_rollback_preserve_user_owned_content(self) -> None:
         before = self._file_bytes()
 
@@ -130,10 +158,7 @@ class MigrationEndToEndTest(unittest.TestCase):
 
         self.assertEqual(applied.returncode, 0, applied.stderr)
         self.assertIn("migration-e2e", applied.stdout)
-        project_id = "repo-" + sha256(
-            b"github.com/example/repo",
-        ).hexdigest()[:12]
-        target_bank = self.central / "projects" / project_id / ".memory-bank"
+        target_bank = self._target_bank()
         self.assertEqual(
             (target_bank / "status.md").read_bytes(),
             (self.bank / "status.md").read_bytes(),
@@ -162,6 +187,129 @@ class MigrationEndToEndTest(unittest.TestCase):
         self.assertTrue(target_bank.is_dir())
         for path, content in before.items():
             self.assertEqual(Path(path).read_bytes(), content, path)
+
+    def test_apply_unions_existing_roots_and_preserves_unrelated_projects(self) -> None:
+        target_bank = self._target_bank()
+        self._copy_bank(target_bank)
+        unrelated = {
+            "project_id": "other-123",
+            "remote": "github.com/example/other",
+            "bank_path": str(self.central / "projects/other-123/.memory-bank"),
+            "known_roots": ["/existing/other"],
+        }
+        self._write_central_registry(
+            {
+                "github.com/example/repo": {
+                    "project_id": target_bank.parent.name,
+                    "remote": "github.com/example/repo",
+                    "bank_path": str(target_bank),
+                    "known_roots": ["/existing/root"],
+                },
+                "github.com/example/other": unrelated,
+            },
+        )
+
+        result = self._run("--apply", "--timestamp", "merge-roots")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        projects = json.loads(
+            (self.central / "registry.json").read_text(encoding="utf-8"),
+        )["projects"]
+        self.assertEqual(projects["github.com/example/other"], unrelated)
+        self.assertEqual(
+            projects["github.com/example/repo"]["known_roots"],
+            sorted(("/existing/root", str(self.repo.resolve()))),
+        )
+
+    def test_existing_same_key_with_different_bank_fails_before_mutation(self) -> None:
+        existing_bank = self.central / "projects/existing/.memory-bank"
+        self._copy_bank(existing_bank, prefix="different")
+        existing_entry = {
+            "project_id": "existing",
+            "remote": "github.com/example/repo",
+            "bank_path": str(existing_bank),
+            "known_roots": ["/existing/root"],
+        }
+        self._write_central_registry(
+            {"github.com/example/repo": existing_entry},
+        )
+        registry_before = (self.central / "registry.json").read_bytes()
+        agents_before = self.global_agents.read_bytes()
+
+        result = self._run("--apply", "--timestamp", "bank-conflict")
+
+        self.assertEqual(result.returncode, 4, result.stderr)
+        self.assertNotIn("successfully", result.stdout)
+        self.assertEqual((self.central / "registry.json").read_bytes(), registry_before)
+        self.assertEqual(self.global_agents.read_bytes(), agents_before)
+        self.assertTrue(self.legacy_registry.is_file())
+        self.assertTrue(self.plugin.is_file())
+        self.assertFalse(self._target_bank().exists())
+
+    def test_transaction_manifest_is_durable_before_registry_mutation(self) -> None:
+        plan = plan_migration(self.home, self.central)
+        actions = _cleanup_actions(self.home, plan)
+        state = self.home / ".local/state/mb-migration"
+        manifest = state / "pre-capture/manifest.json"
+        observed_paths: list[set[str]] = []
+
+        def fail_after_inspecting_manifest(_store: object, _projects: object) -> None:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            observed_paths.append({str(record["path"]) for record in data["records"]})
+            raise MbError("injected registry failure", 4)
+
+        with patch(
+            "migrate_cleanup.RegistryStore.replace_projects",
+            autospec=True,
+            side_effect=fail_after_inspecting_manifest,
+        ):
+            with self.assertRaisesRegex(MbError, "injected registry failure"):
+                _apply(plan, self.central, actions, "pre-capture", state)
+
+        self.assertEqual(len(observed_paths), 1)
+        observed_resolved = {str(Path(path).resolve()) for path in observed_paths[0]}
+        expected_paths = {
+            self.central / "registry.json",
+            self.legacy_registry,
+            self.global_agents,
+            self.project_agents,
+            self.plugin,
+            self.adapter_manifest,
+            self.opencode,
+        }
+        self.assertTrue(
+            {str(path.resolve()) for path in expected_paths}.issubset(
+                observed_resolved,
+            ),
+            observed_resolved,
+        )
+
+    def test_legacy_manifest_cannot_remove_shared_rules_or_hooks(self) -> None:
+        rules = self.home / ".claude/RULES.md"
+        hooks = self.home / ".claude/hooks.json"
+        rules.parent.mkdir(parents=True, exist_ok=True)
+        rules.write_text("user rules\n", encoding="utf-8")
+        hooks.write_text('{"user": true}\n', encoding="utf-8")
+        legacy_manifest = self.home / "legacy-install.json"
+        self._write_json(
+            legacy_manifest,
+            {"files": [str(rules), str(hooks), str(self.global_agents)]},
+        )
+        self.env["MB_LEGACY_MANIFEST"] = str(legacy_manifest)
+
+        result = self._run("--apply", "--timestamp", "protect-shared")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(rules.read_text(encoding="utf-8"), "user rules\n")
+        self.assertEqual(hooks.read_text(encoding="utf-8"), '{"user": true}\n')
+        self.assertEqual(self.global_agents.read_text(encoding="utf-8"), "user-global\n")
+
+    def test_invalid_cli_combination_uses_mb_error_exit_one(self) -> None:
+        result = self._run("--apply", "--rollback", "migration-e2e")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("mb migration:", result.stderr)
+        self.assertNotIn("usage:", result.stderr)
 
 
 if __name__ == "__main__":
