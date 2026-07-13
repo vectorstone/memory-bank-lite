@@ -190,6 +190,7 @@ class MigrationEndToEndTest(unittest.TestCase):
 
     def test_mixed_registry_migrates_valid_record_and_retains_unresolved_record(self) -> None:
         missing_root = self.home / "removed-project"
+        missing_bank_root = self.home / "removed-project-without-bank"
         unresolved_bank_target = self.home / "unresolved-bank-target" / ".memory-bank"
         self._copy_bank(unresolved_bank_target, prefix="unresolved")
         unresolved_bank = self.home / "unresolved-bank-link" / ".memory-bank"
@@ -204,15 +205,71 @@ class MigrationEndToEndTest(unittest.TestCase):
         escaping_link = nested.parent / "outside-link"
         escaping_link.symlink_to(outside_target)
         escaping_link_anchored = escaping_link.parent.resolve() / escaping_link.name
-        unrelated_owned = self.home / ".claude/agents/unrelated-owned.md"
-        unrelated_owned.parent.mkdir(parents=True)
+        protected_claude = unresolved_bank_target / ".claude"
+        protected_claude.mkdir()
+        claude_root = self.home / ".claude"
+        claude_root.symlink_to(protected_claude, target_is_directory=True)
+        claude_settings = claude_root / "settings.json"
+        self._write_json(
+            claude_settings,
+            {
+                "hooks": {
+                    "Stop": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "mb-session-turn.sh # [memory-bank-skill]",
+                                },
+                            ],
+                        },
+                    ],
+                },
+                "theme": "dark",
+            },
+        )
+        removable_registry = claude_root / "memory-bank/registry.json"
+        self._write_json(
+            removable_registry,
+            {"projects": {str(self.repo): {"bank_path": str(self.bank)}}},
+        )
+        protected_pi = unresolved_bank_target / ".pi"
+        (protected_pi / "agent").mkdir(parents=True)
+        pi_root = self.home / ".pi"
+        pi_root.symlink_to(protected_pi, target_is_directory=True)
+        pi_agents = pi_root / "agent/AGENTS.md"
+        pi_agents.write_text(
+            "user-pi\n"
+            "<!-- memory-bank-pi:start -->\n"
+            "managed-pi\n"
+            "<!-- memory-bank-pi:end -->\n",
+            encoding="utf-8",
+        )
+        protected_opencode = unresolved_bank_target / "opencode.json"
+        self._write_json(
+            protected_opencode,
+            {"plugin": [MANAGED_PLUGIN, "user-plugin"], "theme": "dark"},
+        )
+        opencode = self.home / "opencode.json"
+        opencode.symlink_to(protected_opencode)
+        opencode_link_before = opencode.readlink()
+        unrelated_owned = self.home / "unrelated-owned.md"
         unrelated_owned.write_text("managed unrelated artifact\n", encoding="utf-8")
+        registry_target = self.home / "retained-registry-target.json"
+        registry_target.write_bytes(self.legacy_registry.read_bytes())
+        self.legacy_registry.unlink()
+        self.legacy_registry.symlink_to(registry_target)
+        registry_link_before = self.legacy_registry.readlink()
+        legacy_registry_anchored = (
+            self.legacy_registry.parent.resolve() / self.legacy_registry.name
+        )
         self._write_json(
             self.legacy_registry,
             {
                 "projects": {
                     str(self.repo): {"bank_path": str(self.bank)},
                     str(missing_root): {"bank_path": str(unresolved_bank)},
+                    str(missing_bank_root): {"bank_path": 7},
                 },
             },
         )
@@ -222,16 +279,19 @@ class MigrationEndToEndTest(unittest.TestCase):
             {
                 "files": [
                     str(self.legacy_registry),
+                    str(registry_target),
                     str(unresolved_bank),
                     str(unresolved_bank / "status.md"),
                     str(nested),
                     str(escaping_link),
                     str(unrelated_owned),
                 ],
+                "plugin_ref": MANAGED_PLUGIN,
             },
         )
         self.env["MB_LEGACY_MANIFEST"] = str(legacy_manifest)
         registry_before = self.legacy_registry.read_bytes()
+        registry_target_before = registry_target.read_bytes()
         unresolved_bank_link_before = unresolved_bank.readlink()
         outside_target_before = outside_target.read_bytes()
         unresolved_before = {
@@ -250,8 +310,15 @@ class MigrationEndToEndTest(unittest.TestCase):
         self.assertIn("Unresolved legacy records", first_dry_run.stdout)
         self.assertIn(str(self.legacy_registry), first_dry_run.stdout)
         self.assertIn(str(missing_root), first_dry_run.stdout)
+        self.assertIn(str(missing_bank_root), first_dry_run.stdout)
         self.assertIn(str(unresolved_bank), first_dry_run.stdout)
+        self.assertIn("bank=unavailable", first_dry_run.stdout)
+        self.assertIn("bank_path is unavailable", first_dry_run.stdout)
         self.assertIn("registry retained", first_dry_run.stdout)
+        self.assertNotIn(
+            f"remove-owned: {legacy_registry_anchored}",
+            first_dry_run.stdout,
+        )
         self.assertNotIn(
             f"remove-owned: {self.legacy_registry.resolve()}",
             first_dry_run.stdout,
@@ -272,6 +339,13 @@ class MigrationEndToEndTest(unittest.TestCase):
             f"remove-owned: {escaping_link_anchored}",
             first_dry_run.stdout,
         )
+        self.assertNotIn(f"strip-blocks: {pi_agents}", first_dry_run.stdout)
+        self.assertNotIn(f"clean-hooks: {claude_settings}", first_dry_run.stdout)
+        self.assertNotIn(
+            f"remove-owned: {removable_registry}",
+            first_dry_run.stdout,
+        )
+        self.assertNotIn(f"opencode-plugin: {opencode}", first_dry_run.stdout)
         self.assertIn(
             f"remove-owned: {unrelated_owned.resolve()}",
             first_dry_run.stdout,
@@ -293,13 +367,18 @@ class MigrationEndToEndTest(unittest.TestCase):
             (self.central / "registry.json").read_text(encoding="utf-8"),
         )["projects"]
         self.assertEqual(tuple(projects), ("github.com/example/repo",))
+        self.assertTrue(self.legacy_registry.is_symlink())
+        self.assertEqual(self.legacy_registry.readlink(), registry_link_before)
         self.assertEqual(self.legacy_registry.read_bytes(), registry_before)
+        self.assertEqual(registry_target.read_bytes(), registry_target_before)
         self.assertFalse(unrelated_owned.exists())
         self.assertTrue(unresolved_bank.is_symlink())
         self.assertEqual(unresolved_bank.readlink(), unresolved_bank_link_before)
         self.assertTrue(escaping_link.is_symlink())
         self.assertEqual(escaping_link.readlink(), outside_target)
         self.assertEqual(outside_target.read_bytes(), outside_target_before)
+        self.assertTrue(opencode.is_symlink())
+        self.assertEqual(opencode.readlink(), opencode_link_before)
         self.assertEqual(
             {
                 path.relative_to(unresolved_bank_target): path.read_bytes()
@@ -314,12 +393,17 @@ class MigrationEndToEndTest(unittest.TestCase):
         self.assertEqual(rolled_back.returncode, 0, rolled_back.stderr)
         self.assertFalse((self.central / "registry.json").exists())
         self.assertTrue(target_bank.is_dir())
+        self.assertTrue(self.legacy_registry.is_symlink())
+        self.assertEqual(self.legacy_registry.readlink(), registry_link_before)
         self.assertEqual(self.legacy_registry.read_bytes(), registry_before)
+        self.assertEqual(registry_target.read_bytes(), registry_target_before)
         self.assertTrue(unresolved_bank.is_symlink())
         self.assertEqual(unresolved_bank.readlink(), unresolved_bank_link_before)
         self.assertTrue(escaping_link.is_symlink())
         self.assertEqual(escaping_link.readlink(), outside_target)
         self.assertEqual(outside_target.read_bytes(), outside_target_before)
+        self.assertTrue(opencode.is_symlink())
+        self.assertEqual(opencode.readlink(), opencode_link_before)
         self.assertEqual(
             {
                 path.relative_to(unresolved_bank_target): path.read_bytes()

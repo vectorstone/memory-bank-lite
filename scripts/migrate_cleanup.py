@@ -143,7 +143,7 @@ def _anchored_path(path: Path) -> Path:
     return path.parent.resolve() / path.name
 
 
-def _is_manifest_protected(
+def _is_cleanup_protected(
     path: Path,
     protected_paths: frozenset[Path],
     protected_roots: tuple[Path, ...],
@@ -157,7 +157,16 @@ def _is_manifest_protected(
         except ValueError:
             continue
         return True
-    return path.resolve() in protected_paths
+    resolved = path.resolve()
+    if resolved in protected_paths:
+        return True
+    for root in protected_roots:
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            continue
+        return True
+    return False
 
 
 def _manifest_actions(
@@ -165,17 +174,22 @@ def _manifest_actions(
     manifest: Path,
     protected_paths: frozenset[Path],
     protected_roots: tuple[Path, ...] = (),
+    dynamic_protected_paths: frozenset[Path] = frozenset(),
 ) -> list[CleanupAction]:
     data = _load_object(manifest, "adapter manifest")
     actions = [
         CleanupAction("remove-owned", path, f"owned by {manifest}")
         for path in manifest_owned_files(project, manifest)
-        if not _is_manifest_protected(path, protected_paths, protected_roots)
+        if not _is_cleanup_protected(path, protected_paths, protected_roots)
     ]
     plugin_ref = data.get("plugin_ref")
     if isinstance(plugin_ref, str) and plugin_ref:
         config = project / "opencode.json"
-        if config.is_file():
+        if config.is_file() and not _is_cleanup_protected(
+            config,
+            dynamic_protected_paths,
+            protected_roots,
+        ):
             actions.append(
                 CleanupAction(
                     "opencode-plugin",
@@ -189,7 +203,7 @@ def _manifest_actions(
         manifest.resolve().relative_to(project.resolve())
     except (OSError, RuntimeError, ValueError):
         manifest_is_owned = False
-    if manifest_is_owned and not _is_manifest_protected(
+    if manifest_is_owned and not _is_cleanup_protected(
         manifest,
         protected_paths,
         protected_roots,
@@ -219,14 +233,16 @@ def _cleanup_actions(home: Path, plan: MigrationPlan) -> tuple[CleanupAction, ..
     actions: list[CleanupAction] = []
     global_shared = _shared_paths(home, GLOBAL_SHARED_FILES)
     retained_registries = frozenset(
-        _anchored_path(path) for path in plan.retained_legacy_registries
+        value
+        for path in plan.retained_legacy_registries
+        for value in (_anchored_path(path), path.resolve())
     )
     unresolved_bank_locators = frozenset(
         _anchored_path(record.bank_path)
         for record in plan.unresolved_records
         if record.bank_path is not None
     )
-    legacy_protected_paths = retained_registries | unresolved_bank_locators
+    dynamic_protected_paths = retained_registries | unresolved_bank_locators
     unresolved_banks = tuple(
         sorted(
             {
@@ -239,20 +255,37 @@ def _cleanup_actions(home: Path, plan: MigrationPlan) -> tuple[CleanupAction, ..
     )
     for relative in GLOBAL_INSTRUCTIONS:
         path = home / relative
-        if path.is_file():
+        if path.is_file() and not _is_cleanup_protected(
+            path,
+            dynamic_protected_paths,
+            unresolved_banks,
+        ):
             actions.append(CleanupAction("strip-blocks", path, "managed prompt block"))
     claude_settings = home / ".claude/settings.json"
-    if claude_settings.is_file():
+    if claude_settings.is_file() and not _is_cleanup_protected(
+        claude_settings,
+        dynamic_protected_paths,
+        unresolved_banks,
+    ):
         actions.append(CleanupAction("clean-hooks", claude_settings, "managed hooks"))
     for registry in plan.removable_legacy_registries:
-        actions.append(CleanupAction("remove-owned", registry, "legacy registry"))
+        if not _is_cleanup_protected(
+            registry,
+            dynamic_protected_paths,
+            unresolved_banks,
+        ):
+            actions.append(CleanupAction("remove-owned", registry, "legacy registry"))
     roots = sorted(
         {root for project in plan.projects.values() for root in project.known_roots},
     )
     for root in roots:
         project_shared = _shared_paths(root, PROJECT_SHARED_FILES)
         agents = root / "AGENTS.md"
-        if agents.is_file():
+        if agents.is_file() and not _is_cleanup_protected(
+            agents,
+            dynamic_protected_paths,
+            unresolved_banks,
+        ):
             actions.append(CleanupAction("strip-blocks", agents, "managed prompt block"))
         for relative in PROJECT_MANIFESTS:
             manifest = root / relative
@@ -261,8 +294,9 @@ def _cleanup_actions(home: Path, plan: MigrationPlan) -> tuple[CleanupAction, ..
                     _manifest_actions(
                         root,
                         manifest,
-                        project_shared | legacy_protected_paths,
+                        project_shared | dynamic_protected_paths,
                         unresolved_banks,
+                        dynamic_protected_paths,
                     ),
                 )
     for manifest in _legacy_install_manifests(home):
@@ -270,8 +304,9 @@ def _cleanup_actions(home: Path, plan: MigrationPlan) -> tuple[CleanupAction, ..
             _manifest_actions(
                 home,
                 manifest,
-                global_shared | legacy_protected_paths,
+                global_shared | dynamic_protected_paths,
                 unresolved_banks,
+                dynamic_protected_paths,
             ),
         )
     cursor_manifest = home / ".cursor/.mb-manifest.json"
@@ -280,8 +315,9 @@ def _cleanup_actions(home: Path, plan: MigrationPlan) -> tuple[CleanupAction, ..
             _manifest_actions(
                 home,
                 cursor_manifest,
-                global_shared | legacy_protected_paths,
+                global_shared | dynamic_protected_paths,
                 unresolved_banks,
+                dynamic_protected_paths,
             ),
         )
     deduplicated: dict[tuple[str, str, str | None], CleanupAction] = {}
