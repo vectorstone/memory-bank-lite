@@ -293,7 +293,8 @@ silently exceeds the cap or truncates a protected section.
 
 ### 8.3 `done`
 
-`done` is a two-phase operation.
+`done` is a two-phase operation by default, with an explicit one-shot
+fast-write mode at the skill layer.
 
 Phase 1 creates an in-conversation draft containing:
 
@@ -310,14 +311,27 @@ The draft also includes a Bank revision computed from the SHA-256 content of
 `status.md`, `checklist.md`, and `progress.md`. The draft is not written to
 disk.
 
-Phase 2 begins only after explicit user confirmation. The agent submits the
-structured payload to `mb.py done --apply`. The CLI obtains an exclusive lock,
-rechecks the revision, atomically updates `status.md` and `checklist.md`, and
-appends one entry to `progress.md`. A note is created only when the confirmed
-payload contains reusable knowledge.
+Phase 2 begins only after explicit user confirmation in normal mode. The agent
+submits the structured payload to `mb.py done --apply`. The CLI obtains an
+exclusive lock, rechecks the revision, atomically updates `status.md` and
+`checklist.md`, and appends one entry to `progress.md`. A note is created only
+when the payload contains reusable knowledge.
 
 If the user does not confirm, the command writes nothing. Forgetting to invoke
 or confirm `done` means the session is not persisted; this is intentional.
+
+`done --yes`, or an equally explicit same-invocation request to write directly
+without confirmation, preauthorizes Phase 2 for that invocation only. The skill
+builds the same complete payload and applies it without displaying a draft or
+asking again. `--yes` is not a Python CLI argument and is never passed to
+`mb.py`; vague requests do not activate fast-write mode, and authorization is
+not stored as a preference.
+
+Fast-write mode does not bypass payload validation, repository containment,
+revision checks, locking, or atomic replacement. On a revision conflict, the
+skill may refresh state, rebuild the payload, and retry once. A second conflict
+or any other failure stops the write. This mode trades away human semantic
+review, so a plausible but inaccurate summary can be persisted immediately.
 
 ### 8.4 `recall`
 
@@ -430,8 +444,9 @@ Required automated coverage includes:
   concurrent registration;
 - start selection, 8 KB cap, trimming priority, and byte-identical read-only
   behavior;
-- done confirmation boundary, revision conflicts, concurrent apply, append-only
-  progress, conditional notes, path validation, and payload non-execution;
+- done confirmation and fast-write skill protocols, revision conflicts,
+  concurrent apply, append-only progress, conditional notes, path validation,
+  and payload non-execution;
 - recall result limits, single-result expansion, missing optional data, and
   read-only behavior;
 - migration dry-run, marker-safe cleanup, user-content preservation, Bank
@@ -453,8 +468,10 @@ Using `onduty` as the real project:
 8. Start output is at most 8 KB.
 9. An unconfirmed `done` draft leaves the Bank byte-identical.
 10. A confirmed `done` appears in `start` from another host.
-11. No global or project AGENTS/CLAUDE file contains Memory Bank content.
-12. Outside explicit `init`, `start`, `done`, and `recall` invocations, Memory
+11. An explicitly preauthorized `done --yes` writes without a second prompt and
+    appears in `start` from another host.
+12. No global or project AGENTS/CLAUDE file contains Memory Bank content.
+13. Outside explicit `init`, `start`, `done`, and `recall` invocations, Memory
     Bank Lite performs no action.
 
 ## 13. Final Design Decision

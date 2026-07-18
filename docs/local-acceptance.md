@@ -275,6 +275,17 @@ cmp /tmp/mb-lite-bank-before.sha256 /tmp/mb-lite-bank-declined.sha256
 Run `done` again, review the draft, and confirm the write. Run `start` in
 another host and verify that it shows the new progress summary.
 
+Run `done --yes` with a distinct summary. Verify that the host does not display
+the draft or request a second confirmation, reports the applied summary plus
+the resulting revision and note path, and that `start` in another host shows
+the new summary. Repeat this check with an explicit natural-language request
+such as `done, write without confirmation` or `done，直接写入`; do not use vague
+wording such as `save quickly`.
+
+The shortcut is a one-shot skill authorization, not an `mb.py` option. It must
+still stop on schema, key-file containment, or write errors. It may rebuild and
+retry once after a revision conflict, but must stop after a second conflict.
+
 ## 7. Rollback Drill
 
 Run rollback only when acceptance fails, using the transaction ID recorded
