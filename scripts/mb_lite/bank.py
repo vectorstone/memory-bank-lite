@@ -13,6 +13,7 @@ from .errors import MbError
 
 
 CORE_FILES = ("status.md", "checklist.md", "progress.md")
+V2_CORE_FILES = CORE_FILES + ("attention.md",)
 OPTIONAL_FILES = ("roadmap.md", "research.md", "backlog.md", "lessons.md")
 
 
@@ -88,7 +89,7 @@ def _populate_bank(descriptor: int) -> None:
         os.close(done_descriptor)
     finally:
         os.close(plans_descriptor)
-    for name in CORE_FILES + OPTIONAL_FILES:
+    for name in V2_CORE_FILES + OPTIONAL_FILES:
         _write_missing_file(descriptor, name, _read_template(name))
     for name in CORE_FILES:
         read_file_at(descriptor, name).decode("utf-8")
@@ -225,3 +226,16 @@ def validate_bank(bank: Path) -> Path:
     except (OSError, UnicodeError) as exc:
         raise MbError(f"Bank directory does not exist: {bank}", 4) from exc
     return bank
+
+
+def validate_v2_bank(bank: Path) -> Path:
+    validate_bank(bank)
+    try:
+        descriptor = open_directory_path(Path(bank))
+        try:
+            read_file_at(descriptor, "attention.md").decode("utf-8")
+        finally:
+            os.close(descriptor)
+    except (OSError, UnicodeError) as exc:
+        raise MbError(f"missing readable attention.md: {Path(bank) / 'attention.md'}", 4) from exc
+    return Path(bank)

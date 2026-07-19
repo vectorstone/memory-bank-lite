@@ -1,7 +1,9 @@
 from pathlib import Path
 import re
+from datetime import date
 
-from .bank import validate_bank
+from .attention import parse_attention
+from .bank import validate_bank, validate_v2_bank
 from .bank_fs import bank_markdown_files, read_bank_text
 from .errors import MbError
 
@@ -126,3 +128,70 @@ def build_start_context(bank: Path, section: str | None = None) -> str:
         else:
             raise MbError("start output exceeds 8192 bytes after optional trimming", 1)
     return _render(current, open_items, stage_title, stage_detail, recent, note_titles, trimmed)
+
+
+def _attention_context(bank: Path) -> list[str]:
+    source = read_bank_text(bank, "attention.md", required=True) or ""
+    severity_order = {"high": 0, "medium": 1, "low": 2}
+    active = [entry for entry in parse_attention(source) if entry.status == "active"]
+    active.sort(key=lambda entry: (severity_order[entry.severity], entry.attention_id))
+    today = date.today()
+    return [
+        f"- [{entry.severity}] {entry.attention_id} {entry.title}"
+        + (" (review due)" if entry.review_due(today) else "")
+        for entry in active
+    ]
+
+
+def build_v2_start_context(bank: Path, section: str | None = None) -> str:
+    validate_v2_bank(bank)
+    attention = _attention_context(bank)
+    if section == "attention":
+        output = "## attention\n\n" + ("\n".join(attention) if attention else "No active attention.") + "\n"
+        if len(output.encode("utf-8")) > MAX_BYTES:
+            raise MbError("start section attention exceeds 8192 bytes; use recall", 1)
+        return output
+    base = build_start_context(bank, section)
+    if section is not None:
+        return base
+    if not attention:
+        attention = ["No active attention."]
+    marker = "\n\n## Open Items\n\n"
+    while True:
+        block = "\n\n## Attention\n\n" + "\n".join(attention)
+        output = base.replace(marker, block + marker, 1)
+        if len(output.encode("utf-8")) <= MAX_BYTES:
+            return output
+        if len(attention) <= 1:
+            raise MbError("protected start sections exceed 8192 bytes after attention", 1)
+        attention.pop()
+
+
+def build_workspace_start_context(
+    bank: Path,
+    member_contexts: tuple[tuple[str, str], ...],
+    section: str | None = None,
+) -> str:
+    lines = [f"- {name}: {context}" for name, context in member_contexts]
+    members = lines or ["No member summaries available."]
+    if section == "members":
+        output = "## members\n\n" + "\n".join(members) + "\n"
+        if len(output.encode("utf-8")) > MAX_BYTES:
+            raise MbError("start section members exceeds 8192 bytes; use recall", 1)
+        return output
+    base = build_v2_start_context(bank, section)
+    if section is not None:
+        return base
+    marker = "\n\n## Open Items\n\n"
+    omitted = 0
+    while True:
+        visible = members[: max(1, len(members) - omitted)]
+        body = "\n".join(visible)
+        if omitted:
+            body += f"\n- ... {omitted} member summaries omitted"
+        output = base.replace(marker, f"\n\n## Members\n\n{body}" + marker, 1)
+        if len(output.encode("utf-8")) <= MAX_BYTES:
+            return output
+        if len(visible) <= 1:
+            raise MbError("Workspace start output exceeds 8192 bytes", 1)
+        omitted += 1

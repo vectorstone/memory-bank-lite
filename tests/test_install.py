@@ -4,6 +4,8 @@ import subprocess
 import tempfile
 import unittest
 
+from tests.test_v2_config_catalog import V2ConfigCatalogTest
+
 
 REPO = Path(__file__).resolve().parents[1]
 INSTALL = REPO / "install.sh"
@@ -98,10 +100,36 @@ class InstallTest(unittest.TestCase):
             (self.home / ".agents" / "skills" / "mb").resolve(),
             REPO.resolve(),
         )
+
+    def test_install_can_record_a_valid_vault_path(self) -> None:
+        vault = V2ConfigCatalogTest()._vault(self.home)
+        result = subprocess.run(
+            ["bash", str(INSTALL), "--vault-path", str(vault)],
+            env=self.env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = self.home / ".config/memory-bank-lite/config.json"
+        self.assertIn(str(vault.resolve()), config.read_text(encoding="utf-8"))
         self.assertEqual(
             (self.home / ".claude" / "skills" / "mb").resolve(),
             REPO.resolve(),
         )
+
+    def test_install_with_invalid_vault_writes_no_skill_artifacts(self) -> None:
+        invalid = self.home / "not-a-vault"
+        invalid.mkdir()
+        result = subprocess.run(
+            ["bash", str(INSTALL), "--vault-path", str(invalid)],
+            env=self.env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.home / ".agents" / "skills" / "mb").exists())
+        self.assertFalse((self.home / ".claude" / "skills" / "mb").exists())
+        self.assertFalse((self.home / ".claude" / "commands" / "mb.md").exists())
 
     def test_uninstall_preserves_bank_data_and_removes_only_owned_artifacts(self) -> None:
         installed = self._run(INSTALL)

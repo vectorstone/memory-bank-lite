@@ -306,6 +306,17 @@ class BackupTransaction:
         checksum = sha256(content).hexdigest().encode("ascii") + b"\n"
         _atomic_write(self.directory / "manifest.sha256", checksum)
 
+    def mark_complete(self, status: str, details: dict[str, object]) -> None:
+        if status not in {"committed", "rolled_back"}:
+            raise ValueError(f"invalid transaction completion status: {status}")
+        content = json.dumps(
+            {"status": status, **details},
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ).encode("utf-8") + b"\n"
+        _atomic_write(self.directory / "complete.json", content)
+
     @staticmethod
     def rollback(directory: Path) -> None:
         try:

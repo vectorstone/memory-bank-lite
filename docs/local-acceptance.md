@@ -1,5 +1,40 @@
 # Local Acceptance
 
+## v2 Disposable-Vault Acceptance
+
+Run the automated baseline first:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+The v2 tests create disposable `claude-obsidian` vaults and repositories under
+the system temporary directory. They must not use the configured GavinObsidian
+vault or the user's normal config/state roots.
+
+Required v2 cycles are:
+
+1. configure a compatible vault with `config set-vault`;
+2. initialize a remote Project and adopt a no-remote Project on a second
+   simulated device;
+3. preview and confirm a Workspace with multiple repositories/worktrees;
+4. verify Workspace `start` aggregation and scope-bounded `recall`;
+5. apply one compound Workspace `done` and prove a stale member revision causes
+   zero writes;
+6. preview a Project and Workspace publish, prove preview is byte-for-byte
+   read-only, then apply and verify page/index/sub-index/log/hot/publish-state;
+7. verify address allocation and `.raw/.manifest.json` update when the allocator
+   is usable, plus addressless fallback when its host lock dependency is absent;
+8. verify CLI transport, declared filesystem fallback, and injected partial
+   failure rollback;
+9. run Doctor with before/after hashes and prove it is read-only;
+10. dry-run and apply v1-to-v2 migration, then separately dry-run and apply
+    cleanup to a recovery backup.
+
+Before any test against the real GavinObsidian vault, capture exact target file
+hashes and show the publish diff to the user. Do not add `--apply` without a
+separate explicit approval for that real-vault mutation.
+
 ## 1. Baseline
 
 Capture file content, type, mode, and symlink targets before and after the

@@ -25,7 +25,7 @@ from mb_lite.registry import RegistryStore
 from mb_lite.transaction import BackupTransaction
 
 
-DEFAULT_HOME = Path("/Users/wangxiaoguang/Docs/obsidian/memory-bank")
+DEFAULT_HOME = Path.home() / "Docs/obsidian/memory-bank"
 GLOBAL_INSTRUCTIONS = (
     ".codex/AGENTS.md",
     ".claude/CLAUDE.md",

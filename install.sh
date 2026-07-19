@@ -1,6 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+VAULT_PATH=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --vault-path)
+      [[ $# -ge 2 ]] || { printf '%s\n' '--vault-path requires a path' >&2; exit 1; }
+      VAULT_PATH="$2"
+      shift 2
+      ;;
+    -h|--help)
+      printf 'Usage: %s [--vault-path PATH]\n' "$0"
+      exit 0
+      ;;
+    *)
+      printf 'Unknown argument: %s\n' "$1" >&2
+      exit 1
+      ;;
+  esac
+done
+
 SOURCE="${MB_LITE_SOURCE:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)}"
 SOURCE="$(cd -- "$SOURCE" && pwd -P)"
 AGENTS_SKILL="$HOME/.agents/skills/mb"
@@ -40,6 +59,10 @@ if [[ -e "$CLAUDE_COMMAND" || -L "$CLAUDE_COMMAND" ]]; then
     printf 'Refusing to replace non-owned path: %s\n' "$CLAUDE_COMMAND" >&2
     exit 1
   fi
+fi
+
+if [[ -n "$VAULT_PATH" ]]; then
+  python3 "$SOURCE/scripts/mb.py" config set-vault "$VAULT_PATH"
 fi
 
 mkdir -p -- "$(dirname -- "$AGENTS_SKILL")"
