@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from scripts.mb_lite.bindings import BindingStore
+from scripts.mb_lite.bindings import Binding, BindingStore
 from scripts.mb_lite.catalog import CatalogStore, generated_id, remote_project_id
 from scripts.mb_lite.config import resolve_runtime, write_vault_config
 from scripts.mb_lite.errors import MbError
@@ -116,6 +116,29 @@ class V2ConfigCatalogTest(unittest.TestCase):
             self.assertEqual(store.lookup_exact(repo).scope_id, project_id)
             payload = json.loads(store.path.read_text(encoding="utf-8"))
             self.assertIn(str(repo.resolve()), payload["roots"])
+
+    def test_rebind_requires_the_exact_current_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value)
+            repo = root / "repo"
+            repo.mkdir()
+            store = BindingStore(root / "state")
+            project_id = generated_id("repo")
+            workspace_id = generated_id("workspace")
+            store.bind(repo, "project", project_id)
+            with self.assertRaisesRegex(MbError, "binding changed"):
+                store.rebind(
+                    repo,
+                    Binding("project", generated_id("stale")),
+                    Binding("workspace", workspace_id),
+                )
+            self.assertEqual(store.lookup_exact(repo), Binding("project", project_id))
+            store.rebind(
+                repo,
+                Binding("project", project_id),
+                Binding("workspace", workspace_id),
+            )
+            self.assertEqual(store.lookup_exact(repo), Binding("workspace", workspace_id))
 
 
 if __name__ == "__main__":

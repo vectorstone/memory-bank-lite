@@ -199,11 +199,21 @@ Workspace initialization is explicit:
 
 ```text
 /mb init --workspace --name <name> [--member <path> ...]
+/mb init --workspace --name <name> --convert-project [--member <path> ...]
 ```
 
 The tool may discover immediate child Git roots, but only presents candidates.
 No member is registered until confirmation. Later membership changes require
 explicit `workspace add` or `workspace remove` actions.
+
+When the exact Workspace root is already bound to a Project, conversion is an
+explicit preview-and-confirm operation. The preview identifies the source
+Project and Bank. Confirmed apply copies that Bank into the new Workspace,
+registers the reviewed members, and conditionally replaces only the current
+root Binding. The source Project record and Bank remain intact because the same
+Project identity can be shared by other clones, worktrees, devices, or
+Workspaces. Conversion is journaled; failure restores Catalog and Binding bytes
+and removes every scope directory created by that attempt.
 
 Members reference unique Project IDs. Multiple worktrees of the same remote are
 one Project member, while local bindings retain each checkout path, branch, and
@@ -541,6 +551,11 @@ Confirmed apply:
 4. writes the portable catalog and local bindings;
 5. switches the configured runtime only after validation;
 6. emits a transaction ID.
+
+If a legacy Bank already occupies its final v2 target and lacks only
+`attention.md`, dry-run remains read-only and confirmed apply adds just that
+file. The transaction records the file as previously missing so any later
+Catalog, Binding, or configuration failure removes it during rollback.
 
 Cleanup is a separate dry-run and confirmation. Divergent Banks for one remote,
 unresolved legacy roots, malformed registries, and ambiguous identities remain

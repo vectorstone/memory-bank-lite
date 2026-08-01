@@ -386,3 +386,17 @@ docs: finalize v2 skill protocol and acceptance
 ```
 
 Do not mix installer migration cleanup with publish implementation in one commit.
+
+## 14. Post-v2 Scope Conversion And In-place Upgrade
+
+1. Add explicit `init --workspace ... --convert-project` preview and confirmation
+   handling for roots that already have an exact Project Binding.
+2. Preserve the source Project record and Bank while copying its operational
+   state into the new Workspace and rebinding only the current root.
+3. Journal Catalog and Binding changes, conditionally replace the Binding, and
+   remove all newly created scope directories after a confirmed rollback.
+4. Upgrade an existing v1 migration target only by adding missing
+   `attention.md`, recording that missing file in the rollback manifest before
+   any mutation.
+5. Cover read-only previews, invalid argument combinations, successful apply,
+   byte preservation, and injected late-write failures.

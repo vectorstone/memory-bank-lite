@@ -26,6 +26,11 @@ python3 <skill-dir>/scripts/mb.py --project-root "$PWD" <action>
 - `init --workspace --name <name>` first returns candidate members and writes
   nothing. Show the candidates and obtain confirmation before rerunning with
   `--confirm-members`.
+- `init --workspace --name <name> --convert-project` requires an exact Project
+  binding at the Workspace root. First show the source Project/Bank and candidate
+  members; write nothing until the user confirms and `--confirm-members` is
+  added. Conversion copies the source Bank, preserves the source Project record
+  and Bank, and atomically rebinds only the current root to the new Workspace.
 - Workspace membership changes occur only through explicit `workspace add` or
   `workspace remove` invocations.
 

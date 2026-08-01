@@ -6,7 +6,7 @@ from pathlib import Path
 import shutil
 from uuid import uuid4
 
-from .bank import initialize_bank, validate_bank, validate_v2_bank
+from .bank import initialize_bank, upgrade_bank_to_v2, validate_bank, validate_v2_bank
 from .bindings import BindingStore
 from .catalog import CatalogStore, remote_project_id
 from .config import _atomic_json
@@ -118,6 +118,7 @@ def _fsync_directory(path: Path) -> None:
 
 def _copy_bank(source: Path, target: Path) -> bool:
     if target.exists():
+        upgrade_bank_to_v2(target)
         validate_v2_bank(target)
         return False
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -160,6 +161,16 @@ def apply_v2_migration(
                     findings = ()
                 if findings:
                     raise MbError(f"sensitive content blocks migration: {path}", 1)
+    missing_attention: list[Path] = []
+    for item in items:
+        target = contained_path(catalog.vault, item.target_bank, "memory-bank")
+        if not target.exists():
+            continue
+        attention = target / "attention.md"
+        try:
+            attention.lstat()
+        except FileNotFoundError:
+            missing_attention.append(attention)
     transaction_id = "migrate-" + uuid4().hex[:12]
     transaction = BackupTransaction.create(Path(state_root) / "transactions", transaction_id)
     for path in (catalog.path, bindings.path, config_path):
@@ -168,6 +179,8 @@ def apply_v2_migration(
             transaction.capture(path, "v2-migration")
         else:
             transaction.capture_missing(path, "v2-migration")
+    for attention in missing_attention:
+        transaction.capture_missing(attention, "v2-bank-upgrade")
     transaction.finish()
     created_targets: list[Path] = []
     try:

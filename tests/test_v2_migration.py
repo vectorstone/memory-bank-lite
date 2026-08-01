@@ -16,6 +16,21 @@ from tests.test_v2_config_catalog import V2ConfigCatalogTest
 
 
 class V2MigrationTest(unittest.TestCase):
+    def _write_registry(self, legacy: Path, bank: Path, roots: list[str] | None = None) -> None:
+        legacy.mkdir(parents=True, exist_ok=True)
+        (legacy / "registry.json").write_text(json.dumps({
+            "version": 1,
+            "projects_root": str(legacy / "projects"),
+            "projects": {
+                "github.com/example/repo": {
+                    "project_id": "repo-0432dc9db558",
+                    "remote": "github.com/example/repo",
+                    "bank_path": str(bank),
+                    "known_roots": roots or [],
+                }
+            },
+        }), encoding="utf-8")
+
     def test_migration_rejects_legacy_bank_symlink_before_apply(self) -> None:
         with tempfile.TemporaryDirectory() as value:
             root = Path(value)
@@ -151,6 +166,56 @@ class V2MigrationTest(unittest.TestCase):
             cleaned_payload = json.loads(cleaned.stdout)
             self.assertTrue(cleaned_payload["legacy_home_removed"])
             self.assertTrue(Path(cleaned_payload["recovery_backup"]).is_dir())
+
+    def test_in_place_v1_target_is_upgraded_only_on_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value)
+            vault = V2ConfigCatalogTest()._vault(root)
+            legacy = root / "legacy"
+            bank = vault / "memory-bank/projects/repo-0432dc9db558/.memory-bank"
+            initialize_bank(bank)
+            (bank / "attention.md").unlink()
+            status = (bank / "status.md").read_bytes()
+            self._write_registry(legacy, bank)
+            state_root = root / "state/memory-bank-lite"
+            catalog = CatalogStore(vault, state_root)
+            bindings = BindingStore(state_root)
+            items = plan_v2_migration(legacy, catalog)
+            self.assertFalse((bank / "attention.md").exists())
+            result = apply_v2_migration(items, catalog, bindings, state_root, root / "config.json")
+            self.assertTrue((bank / "attention.md").is_file())
+            self.assertEqual((bank / "status.md").read_bytes(), status)
+            self.assertTrue(result["source_preserved"])
+            self.assertEqual(catalog.project("repo-0432dc9db558").project_id, "repo-0432dc9db558")
+
+    def test_in_place_upgrade_is_removed_when_later_write_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value)
+            vault = V2ConfigCatalogTest()._vault(root)
+            repo = root / "repo"
+            repo.mkdir()
+            legacy = root / "legacy"
+            bank = vault / "memory-bank/projects/repo-0432dc9db558/.memory-bank"
+            initialize_bank(bank)
+            (bank / "attention.md").unlink()
+            status = (bank / "status.md").read_bytes()
+            self._write_registry(legacy, bank, [str(repo)])
+            state_root = root / "state/memory-bank-lite"
+            config_path = root / "config.json"
+            catalog = CatalogStore(vault, state_root)
+            bindings = BindingStore(state_root)
+            items = plan_v2_migration(legacy, catalog)
+            with mock.patch.object(bindings, "bind", side_effect=OSError("injected bindings failure")):
+                with self.assertRaisesRegex(OSError, "injected bindings failure"):
+                    apply_v2_migration(items, catalog, bindings, state_root, config_path)
+            self.assertFalse((bank / "attention.md").exists())
+            self.assertEqual((bank / "status.md").read_bytes(), status)
+            self.assertFalse(catalog.path.exists())
+            self.assertFalse(bindings.path.exists())
+            self.assertFalse(config_path.exists())
+            completions = list((state_root / "transactions").glob("*/complete.json"))
+            self.assertEqual(len(completions), 1)
+            self.assertEqual(json.loads(completions[0].read_text(encoding="utf-8"))["status"], "rolled_back")
 
 
 if __name__ == "__main__":

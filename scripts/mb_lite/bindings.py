@@ -104,6 +104,32 @@ class BindingStore:
             roots[canonical] = proposed
             self._write(data)
 
+    def rebind(self, root: Path, expected: Binding, replacement: Binding) -> None:
+        if expected.scope_type not in {"project", "workspace"}:
+            raise MbError(f"invalid expected scope type: {expected.scope_type}", 1)
+        if replacement.scope_type not in {"project", "workspace"}:
+            raise MbError(f"invalid replacement scope type: {replacement.scope_type}", 1)
+        try:
+            canonical = str(Path(root).resolve(strict=True))
+        except OSError as exc:
+            raise MbError(f"binding root does not exist: {root}", 1) from exc
+        with self.locked():
+            data = self.load()
+            roots = data["roots"]
+            assert isinstance(roots, dict)
+            current = roots.get(canonical)
+            expected_value = {
+                "scope_type": expected.scope_type,
+                "scope_id": expected.scope_id,
+            }
+            if current != expected_value:
+                raise MbError(f"local root binding changed before replacement: {canonical}", 3)
+            roots[canonical] = {
+                "scope_type": replacement.scope_type,
+                "scope_id": replacement.scope_id,
+            }
+            self._write(data)
+
     def lookup_exact(self, root: Path) -> Binding | None:
         canonical = str(Path(root).resolve())
         raw = self.load()["roots"]

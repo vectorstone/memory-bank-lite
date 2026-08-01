@@ -32,7 +32,14 @@ from mb_lite.migrate_v2 import (
 )
 from mb_lite.start import build_start_context, build_v2_start_context, build_workspace_start_context
 from mb_lite.vault import contained_path, validate_vault_contract
-from mb_lite.workspace import candidate_members, initialize_workspace, member_project_id, register_project_root
+from mb_lite.workspace import (
+    candidate_members,
+    convert_project_to_workspace,
+    initialize_workspace,
+    member_project_id,
+    project_conversion_source,
+    register_project_root,
+)
 
 
 DEFAULT_HOME = Path.home() / "Docs/obsidian/memory-bank"
@@ -66,6 +73,7 @@ def _parser() -> argparse.ArgumentParser:
     init.add_argument("--name")
     init.add_argument("--member", action="append", type=Path, default=[])
     init.add_argument("--confirm-members", action="store_true")
+    init.add_argument("--convert-project", action="store_true")
 
     done = sub.add_parser("done")
     done_mode = done.add_mutually_exclusive_group(required=True)
@@ -129,6 +137,8 @@ def _legacy_bank(args: argparse.Namespace, store: RegistryStore):
 def _legacy_dispatch(args: argparse.Namespace) -> int:
     store = RegistryStore(_legacy_home())
     if args.action == "init":
+        if args.convert_project:
+            raise MbError("--convert-project requires a v2 Workspace scope", 1)
         if args.workspace:
             raise MbError("Workspace scopes require a v2 vault configuration", 1)
         identity = resolve_identity(args.project_root)
@@ -295,9 +305,21 @@ def _v2_dispatch(args: argparse.Namespace) -> int:
         print(json.dumps(payload, ensure_ascii=False) if args.json else json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
     if args.action == "init":
+        if args.convert_project and not args.workspace:
+            raise MbError("--convert-project requires --workspace", 1)
         if args.workspace:
             if not args.name or not args.name.strip():
                 raise MbError("Workspace init requires --name", 1)
+            existing = bindings.lookup_exact(Path(args.project_root).resolve())
+            conversion = None
+            if args.convert_project:
+                source, source_bank = project_conversion_source(args.project_root, catalog, bindings)
+                conversion = {
+                    "source_project_id": source.project_id,
+                    "source_bank": str(source_bank),
+                }
+            elif existing is not None and existing.scope_type == "project":
+                raise MbError("Workspace root is bound to a Project; rerun with --convert-project", 1)
             candidates = candidate_members(args.project_root, tuple(args.member))
             preview = {
                 "scope_type": "workspace",
@@ -309,23 +331,35 @@ def _v2_dispatch(args: argparse.Namespace) -> int:
                 ],
                 "requires_confirmation": not args.confirm_members,
             }
+            if conversion is not None:
+                preview["project_conversion"] = conversion
             if not args.confirm_members:
                 print(json.dumps(preview, ensure_ascii=False) if args.json else json.dumps(preview, ensure_ascii=False, indent=2))
                 return 0
             with global_lock(runtime.state_root):
-                record = initialize_workspace(
-                    args.project_root,
-                    args.name.strip(),
-                    tuple(item.root for item in candidates),
-                    catalog,
-                    bindings,
-                )
-            bank = contained_path(vault, record.bank_path, "memory-bank")
-            payload = {
-                "scope_type": "workspace", "scope_id": record.workspace_id,
-                "bank_path": str(bank), "members": list(record.members),
-            }
-            print(json.dumps(payload, ensure_ascii=False) if args.json else f"Initialized {bank}")
+                if args.convert_project:
+                    payload = convert_project_to_workspace(
+                        args.project_root,
+                        args.name.strip(),
+                        tuple(item.root for item in candidates),
+                        catalog,
+                        bindings,
+                        runtime.state_root,
+                    )
+                else:
+                    record = initialize_workspace(
+                        args.project_root,
+                        args.name.strip(),
+                        tuple(item.root for item in candidates),
+                        catalog,
+                        bindings,
+                    )
+                    bank = contained_path(vault, record.bank_path, "memory-bank")
+                    payload = {
+                        "scope_type": "workspace", "scope_id": record.workspace_id,
+                        "bank_path": str(bank), "members": list(record.members),
+                    }
+            print(json.dumps(payload, ensure_ascii=False) if args.json else f"Initialized {payload['bank_path']}")
             return 0
         with global_lock(runtime.state_root):
             payload = _v2_init_project(args, catalog, bindings)

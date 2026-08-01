@@ -35,6 +35,15 @@ class SkillProtocolTest(unittest.TestCase):
         self.assertIn("`--yes` is a skill-level argument; never pass\nit to `mb.py`", skill)
         self.assertNotIn('add_argument("--yes"', cli)
 
+    def test_project_conversion_requires_preview_and_confirmation(self) -> None:
+        skill = SKILL.read_text(encoding="utf-8")
+        cli = CLI.read_text(encoding="utf-8")
+
+        self.assertIn("`init --workspace --name <name> --convert-project`", skill)
+        self.assertIn("write nothing until the user confirms", skill)
+        self.assertIn("preserves the source Project record", skill)
+        self.assertIn('add_argument("--convert-project"', cli)
+
 
 if __name__ == "__main__":
     unittest.main()

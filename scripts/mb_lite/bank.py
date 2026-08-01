@@ -58,7 +58,7 @@ def _ensure_directory(parent_descriptor: int, name: str) -> int:
     return open_directory_at(parent_descriptor, name)
 
 
-def _write_missing_file(descriptor: int, name: str, content: bytes) -> None:
+def _write_missing_file(descriptor: int, name: str, content: bytes) -> bool:
     try:
         existing = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
     except FileNotFoundError:
@@ -66,7 +66,7 @@ def _write_missing_file(descriptor: int, name: str, content: bytes) -> None:
     if existing is not None:
         if not stat.S_ISREG(existing.st_mode):
             raise OSError(f"not a regular file: {name}")
-        return
+        return False
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     file_descriptor = os.open(name, flags, 0o600, dir_fd=descriptor)
     try:
@@ -78,6 +78,7 @@ def _write_missing_file(descriptor: int, name: str, content: bytes) -> None:
     finally:
         if file_descriptor >= 0:
             os.close(file_descriptor)
+    return True
 
 
 def _populate_bank(descriptor: int) -> None:
@@ -239,3 +240,21 @@ def validate_v2_bank(bank: Path) -> Path:
     except (OSError, UnicodeError) as exc:
         raise MbError(f"missing readable attention.md: {Path(bank) / 'attention.md'}", 4) from exc
     return Path(bank)
+
+
+def upgrade_bank_to_v2(bank: Path) -> bool:
+    bank = validate_bank(Path(bank))
+    try:
+        descriptor = open_directory_path(bank)
+        try:
+            created = _write_missing_file(descriptor, "attention.md", _read_template("attention.md"))
+            read_file_at(descriptor, "attention.md").decode("utf-8")
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except MbError:
+        raise
+    except (OSError, UnicodeError) as exc:
+        raise MbError(f"unable to upgrade Bank to v2: {bank}: {exc}", 4) from exc
+    validate_v2_bank(bank)
+    return created
