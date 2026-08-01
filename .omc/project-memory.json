@@ -1,0 +1,87 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1784450431959,
+  "projectRoot": "/Users/wangxiaoguang/IdeaProjects/memory-bank-lite",
+  "techStack": {
+    "languages": [],
+    "frameworks": [],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs",
+      "scripts",
+      "tests"
+    ],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "commands": {
+      "path": "commands",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1784450431936,
+      "keyFiles": [
+        "mb.md"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 1,
+      "lastAccessed": 1784450431943,
+      "keyFiles": [
+        "local-acceptance.md"
+      ]
+    },
+    "scripts": {
+      "path": "scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 2,
+      "lastAccessed": 1784450431944,
+      "keyFiles": [
+        "mb.py",
+        "migrate_cleanup.py"
+      ]
+    },
+    "templates": {
+      "path": "templates",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1784450431944,
+      "keyFiles": []
+    },
+    "tests": {
+      "path": "tests",
+      "purpose": "Test files",
+      "fileCount": 26,
+      "lastAccessed": 1784450431945,
+      "keyFiles": [
+        "__init__.py",
+        "test_bank.py",
+        "test_cleanup.py",
+        "test_cli.py",
+        "test_done_apply.py"
+      ]
+    }
+  },
+  "hotPaths": [],
+  "userDirectives": []
+}
