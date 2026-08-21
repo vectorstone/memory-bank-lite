@@ -106,6 +106,28 @@ class DoneApplyTest(unittest.TestCase):
         }
         self.assertEqual(before, after)
 
+    def test_apply_persists_conclusions_when_checklist_has_no_open_items(self) -> None:
+        (self.bank / "checklist.md").write_text("# Checklist\n", encoding="utf-8")
+
+        result = apply_done(
+            self.bank,
+            self.repo,
+            payload(
+                self.bank,
+                {
+                    "title": "Empty checklist closeout",
+                    "body": "Persist the conclusion independently of checklist state.",
+                },
+            ),
+            datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(result.note_path, "notes/2026-07-10_empty-checklist-closeout.md")
+        self.assertIn("**Focus:** Implemented registry", (self.bank / "status.md").read_text())
+        self.assertIn("Implemented registry", (self.bank / "progress.md").read_text())
+        self.assertNotIn("[x]", (self.bank / "checklist.md").read_text())
+        self.assertTrue((self.bank / result.note_path).is_file())
+
     def test_key_file_outside_repository_is_rejected(self) -> None:
         raw = payload(self.bank)
         invalid = DonePayload(

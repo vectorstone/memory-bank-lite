@@ -343,6 +343,11 @@ summaries in that order. The output states how many entries were omitted.
 Normal mode is draft -> display -> confirmation -> apply. `done --yes` skips the
 display and confirmation but never bypasses validation.
 
+An empty unchecked checklist is a valid closeout state. In that state,
+`completed_items` is a checklist no-op and the remaining conclusion fields may
+still be committed. When unchecked items exist, completion references retain
+their exact-match validation; unmatched or ambiguous items still fail.
+
 Project done updates one Bank. Workspace done creates a compound payload for the
 Workspace Bank and every affected Project Bank. Affected Projects are derived
 from current-session tool/file evidence, member Git status, commits since the

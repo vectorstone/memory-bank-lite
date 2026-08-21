@@ -260,6 +260,13 @@ def _unchecked_pattern(item: str) -> re.Pattern[str]:
     )
 
 
+def _unchecked_items(source: str) -> tuple[str, ...]:
+    return tuple(
+        item.strip()
+        for item in re.findall(r"(?m)^\s*[-*]\s+\[\s\]\s+(.+?)\s*$", source)
+    )
+
+
 def _managed_open_items(source: str) -> tuple[str, ...]:
     pattern = re.compile(
         re.escape(ITEMS_START) + r"(.*?)" + re.escape(ITEMS_END),
@@ -276,15 +283,20 @@ def _managed_open_items(source: str) -> tuple[str, ...]:
 
 def render_checklist(source: str, payload: DonePayload) -> str:
     result = source
-    for item in payload.completed_items:
-        pattern = _unchecked_pattern(item)
-        matches = list(pattern.finditer(result))
-        if len(matches) != 1:
-            raise MbError(
-                f"expected exactly one unchecked item for completion: {item}",
-                1,
-            )
-        result = pattern.sub(r"\1[x]\2", result, count=1)
+    # A Bank may legitimately have no open checklist items. In that state,
+    # completed_items cannot mutate the checklist, so treat it as a no-op and
+    # continue applying the independent summary/note/attention/progress data.
+    # Once any unchecked item exists, retain the strict exact-one-match rule.
+    if _unchecked_items(result):
+        for item in payload.completed_items:
+            pattern = _unchecked_pattern(item)
+            matches = list(pattern.finditer(result))
+            if len(matches) != 1:
+                raise MbError(
+                    f"expected exactly one unchecked item for completion: {item}",
+                    1,
+                )
+            result = pattern.sub(r"\1[x]\2", result, count=1)
     existing = set(
         re.findall(r"(?m)^\s*[-*]\s+\[[ xX]\]\s+(.+?)\s*$", result),
     )

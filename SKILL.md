@@ -60,6 +60,11 @@ For Project done:
 3. Draft the existing done payload with `bank_revision`, `summary`,
    `decisions`, `next_steps`, `blockers`, repository-relative `key_files`,
    `completed_items`, `new_items`, `note`, and `attention_changes`.
+   `completed_items` must contain only exact matches for currently unchecked
+   checklist items. If the current checklist has no unchecked items, set
+   `completed_items` to an empty list and put the work's conclusions in
+   `summary`, `decisions`, `next_steps`, `blockers`, `note`, and/or
+   `attention_changes`.
 
 For Workspace done:
 

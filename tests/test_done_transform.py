@@ -58,6 +58,29 @@ class DoneTransformTests(unittest.TestCase):
         with self.assertRaisesRegex(MbError, "expected exactly one unchecked item"):
             render_checklist(source, PAYLOAD)
 
+    def test_checklist_completion_is_noop_when_no_items_are_open(self) -> None:
+        from scripts.mb_lite.done import render_checklist
+
+        source = (
+            "# Checklist\n"
+            "<!-- mb-lite:open-items:start -->\n"
+            "## Memory Bank Lite Open Items\n\n"
+            "<!-- mb-lite:open-items:end -->\n"
+        )
+
+        result = render_checklist(source, PAYLOAD)
+
+        self.assertNotIn("- [x] Define registry schema", result)
+        self.assertIn("- [ ] Implement recall", result)
+
+    def test_checklist_unmatched_completion_still_fails_with_other_open_items(self) -> None:
+        from scripts.mb_lite.done import render_checklist
+
+        source = "# Checklist\n- [ ] Keep exact\n"
+
+        with self.assertRaisesRegex(MbError, "expected exactly one unchecked item"):
+            render_checklist(source, PAYLOAD)
+
     def test_checklist_removes_completed_item_from_managed_open_items(self) -> None:
         from scripts.mb_lite.done import render_checklist
 

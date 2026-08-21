@@ -229,6 +229,12 @@ items. A missing or ambiguous match fails the whole apply. New items are added
 under a paired `mb-lite:open-items` block; existing checklist sections remain
 untouched.
 
+When a Bank has no unchecked checklist items, `completed_items` has no checklist
+mutation to perform and is treated as a no-op. The skill should normally emit
+an empty `completed_items` list in this state; summary, decisions, next steps,
+blockers, notes, and attention changes remain independently writable. If any
+unchecked item exists, missing or ambiguous completion matches still fail.
+
 Every new progress entry has a stable marker and fixed headings:
 
 ```markdown

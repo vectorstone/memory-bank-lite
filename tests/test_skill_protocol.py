@@ -28,6 +28,13 @@ class SkillProtocolTest(unittest.TestCase):
         self.assertIn("retry once without asking", skill)
         self.assertIn("after a second revision conflict", skill)
 
+    def test_done_payload_handles_empty_checklist_without_inventing_completions(self) -> None:
+        skill = SKILL.read_text(encoding="utf-8")
+
+        self.assertIn("`completed_items` must contain only exact matches", skill)
+        self.assertIn("If the current checklist has no unchecked items", skill)
+        self.assertIn("set\n   `completed_items` to an empty list", skill)
+
     def test_yes_is_not_added_to_python_cli(self) -> None:
         skill = SKILL.read_text(encoding="utf-8")
         cli = CLI.read_text(encoding="utf-8")
