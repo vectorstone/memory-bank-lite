@@ -10,7 +10,19 @@ import re
 import tempfile
 from typing import Any, Iterator
 
-from .attention import AttentionEntry, next_attention_id, parse_attention, render_attention
+from .attention import (
+    AttentionEntry,
+    next_attention_id,
+    parse_attention,
+    parse_attention_entries,
+    render_attention,
+    render_attention_archive,
+)
+from .archive import (
+    merge_archive_text,
+    plan_progress_roll,
+    progress_archive_name,
+)
 from .bank import CORE_FILES, validate_bank, validate_v2_bank
 from .bank_fs import bank_markdown_files, read_bank_file, read_bank_text
 from .errors import MbError
@@ -81,6 +93,7 @@ class AttentionChange:
     evidence: str | None
     verified_at: str | None
     review_after_days: int | None
+    status: str | None = None
 
 
 def _attention_changes(data: dict[str, Any]) -> tuple[AttentionChange, ...]:
@@ -107,6 +120,13 @@ def _attention_changes(data: dict[str, Any]) -> tuple[AttentionChange, ...]:
         review = value.get("review_after_days")
         if review is not None and (type(review) is not int or review < 1 or review > 3650):
             raise MbError("invalid attention review_after_days", 1)
+        status = value.get("status")
+        if status is not None and status not in {"active", "resolved", "superseded"}:
+            raise MbError("invalid attention status", 1)
+        if action == "add" and status is not None:
+            raise MbError("attention add must not supply a status", 1)
+        if action in {"resolve", "supersede"} and status is not None:
+            raise MbError(f"attention {action} derives status; do not supply one", 1)
         if action == "add" and any(fields[field] is None for field in ("title", "scope", "severity", "reason", "evidence", "verified_at")):
             raise MbError("attention add requires all fields", 1)
         if action == "add" and attention_id is not None:
@@ -123,7 +143,7 @@ def _attention_changes(data: dict[str, Any]) -> tuple[AttentionChange, ...]:
         result.append(
             AttentionChange(
                 action, attention_id, fields["title"], fields["scope"], fields["severity"],
-                fields["reason"], fields["evidence"], fields["verified_at"], review,
+                fields["reason"], fields["evidence"], fields["verified_at"], review, status,
             )
         )
     return tuple(result)
@@ -334,16 +354,23 @@ def _bullet_section(
     return f"## {title}\n" + "\n".join(bullets)
 
 
-def render_progress_entry(payload: DonePayload, timestamp: str) -> str:
+def render_progress_entry(
+    payload: DonePayload,
+    timestamp: str,
+    note_relative: str | None = None,
+) -> str:
     marker_hash = sha256(
         (timestamp + "\0" + payload.summary).encode("utf-8"),
     ).hexdigest()[:8]
     compact = timestamp.replace("-", "").replace(":", "")
     marker = f"{compact}-{marker_hash}"
     heading_time = timestamp.replace("T", " ").removesuffix("Z")
+    heading = f"### {heading_time} - {payload.summary}"
+    if note_relative is not None:
+        heading += f"\n\n- Note: `{note_relative}`"
     sections = [
         f"<!-- mb-lite-entry:{marker} -->",
-        f"### {heading_time} - {payload.summary}",
+        heading,
         _bullet_section("Decisions", payload.decisions),
         _bullet_section("Next Steps", payload.next_steps),
         _bullet_section("Blockers", payload.blockers),
@@ -356,12 +383,16 @@ def render_progress_entry(payload: DonePayload, timestamp: str) -> str:
 class ApplyResult:
     revision: str
     note_path: str | None
+    archived_entries: int = 0
+    archived_attention: int = 0
 
 
 @dataclass(frozen=True)
 class PreparedDone:
     outputs: tuple[tuple[Path, str], ...]
     note_path: str | None
+    archived_entries: int = 0
+    archived_attention: int = 0
 
 
 class BankWriteError(MbError):
@@ -455,10 +486,27 @@ def _validate_key_files(repo: Path, values: tuple[str, ...]) -> None:
             raise MbError(f"key file is outside repository: {value}", 1) from exc
 
 
-def _apply_attention_changes(source: str, changes: tuple[AttentionChange, ...]) -> str:
+def _apply_attention_changes(
+    active_source: str,
+    archive_source: str | None,
+    changes: tuple[AttentionChange, ...],
+) -> tuple[str, str | None]:
+    """Apply changes across active + archived items, then split by status.
+
+    Closed items (resolved/superseded) leave attention.md and live only in
+    archive/attention.md, keeping the active file bounded. An update that
+    reactivates a closed item moves it back automatically.
+    """
     if not changes:
-        return source
-    entries = list(parse_attention(source))
+        return active_source, archive_source
+    entries = list(parse_attention(active_source))
+    if archive_source:
+        existing_archived = parse_attention_entries(archive_source)
+        active_ids = {entry.attention_id for entry in entries}
+        clash = active_ids & {entry.attention_id for entry in existing_archived}
+        if clash:
+            raise MbError(f"duplicate attention ID: {sorted(clash)[0]}", 4)
+        entries.extend(existing_archived)
     by_id = {entry.attention_id: index for index, entry in enumerate(entries)}
     for change in changes:
         if change.action == "add":
@@ -489,6 +537,8 @@ def _apply_attention_changes(source: str, changes: tuple[AttentionChange, ...]) 
             status = "resolved"
         elif change.action == "supersede":
             status = "superseded"
+        elif change.status is not None:
+            status = change.status
         entries[index] = AttentionEntry(
             old.attention_id,
             change.title or old.title,
@@ -500,7 +550,11 @@ def _apply_attention_changes(source: str, changes: tuple[AttentionChange, ...]) 
             date.fromisoformat(change.verified_at) if change.verified_at else old.verified_at,
             change.review_after_days or old.review_after_days,
         )
-    return render_attention(source, tuple(entries))
+    active = tuple(entry for entry in entries if entry.status == "active")
+    closed = tuple(entry for entry in entries if entry.status != "active")
+    active_content = render_attention(active_source, active)
+    archive_content = render_attention_archive(closed)
+    return active_content, archive_content
 
 
 def _write_all_or_rollback(outputs: tuple[tuple[Path, str], ...]) -> None:
@@ -535,6 +589,20 @@ def _write_all_or_rollback(outputs: tuple[tuple[Path, str], ...]) -> None:
                 os.unlink(staged_name)
 
 
+def _note_target(bank: Path, now: datetime, title: str) -> tuple[str, Path]:
+    """Resolve a note path; same-day collisions take a -2, -3... suffix."""
+    base = f"notes/{now:%Y-%m-%d}_{_slug(title)}.md"
+    stem = base[: -len(".md")]
+    for attempt in range(1, 100):
+        relative = base if attempt == 1 else f"{stem}-{attempt}.md"
+        target = bank / relative
+        if target.is_symlink():
+            raise MbError(f"note already exists: {relative}", 4)
+        if not target.exists():
+            return relative, target
+    raise MbError(f"unable to allocate note filename for: {title}", 1)
+
+
 def prepare_done(bank: Path, repo: Path, payload: DonePayload, now: datetime) -> PreparedDone:
     validate_bank(bank)
     _validate_key_files(repo, payload.key_files)
@@ -550,34 +618,70 @@ def prepare_done(bank: Path, repo: Path, payload: DonePayload, now: datetime) ->
         read_bank_text(bank, "checklist.md", required=True) or "",
         payload,
     )
-    progress_source = read_bank_text(bank, "progress.md", required=True) or ""
-    separator = "" if progress_source.endswith("\n") else "\n"
-    progress = progress_source + separator + "\n" + render_progress_entry(payload, timestamp)
-    attention_path = bank / "attention.md"
-    attention_content: str | None = None
-    if payload.attention_changes:
-        attention_source = read_bank_text(bank, "attention.md", required=True) or ""
-        attention_content = _apply_attention_changes(attention_source, payload.attention_changes)
     note_relative: str | None = None
     note_target: Path | None = None
     note_content: str | None = None
     if payload.note is not None:
-        note_relative = f"notes/{now:%Y-%m-%d}_{_slug(payload.note.title)}.md"
-        note_target = bank / note_relative
+        note_relative, note_target = _note_target(bank, now, payload.note.title)
         notes_directory = note_target.parent
         if notes_directory.is_symlink():
             raise MbError(f"notes directory is not a real directory: {notes_directory}", 4)
-        if note_target.is_symlink():
-            raise MbError(f"note already exists: {note_relative}", 4)
-        if note_target.exists():
-            raise MbError(f"note already exists: {note_relative}", 1)
         note_content = f"# {payload.note.title}\n\n{payload.note.body.rstrip()}\n"
-    outputs = [(status_path, status), (checklist_path, checklist), (progress_path, progress)]
+    progress_source = read_bank_text(bank, "progress.md", required=True) or ""
+    separator = "" if progress_source.endswith("\n") else "\n"
+    entry = render_progress_entry(payload, timestamp, note_relative)
+    roll = plan_progress_roll(progress_source + separator + "\n" + entry)
+    attention_path = bank / "attention.md"
+    attention_content: str | None = None
+    attention_archive_content: str | None = None
+    archived_attention = 0
+    if payload.attention_changes:
+        active_source = read_bank_text(bank, "attention.md", required=True) or ""
+        archive_source = read_bank_text(bank, "archive/attention.md")
+        closed_before = sum(
+            1
+            for source in (active_source, archive_source or "")
+            for item in parse_attention_entries(source)
+            if item.status != "active"
+        )
+        attention_content, attention_archive_content = _apply_attention_changes(
+            active_source, archive_source, payload.attention_changes,
+        )
+        closed_after = 0
+        if attention_archive_content:
+            closed_after = len(parse_attention_entries(attention_archive_content))
+        archived_attention = closed_after - closed_before
+    outputs: list[tuple[Path, str]] = [
+        (status_path, status),
+        (checklist_path, checklist),
+        (progress_path, roll.retained),
+    ]
+    rolled_by_file: dict[str, list[str]] = {}
+    for rolled_entry in roll.archived:
+        rolled_by_file.setdefault(progress_archive_name(rolled_entry), []).append(
+            rolled_entry.raw,
+        )
+    for relative, additions in sorted(rolled_by_file.items()):
+        existing = read_bank_text(bank, relative)
+        year = relative[len("archive/progress-"):-len(".md")]
+        merged = merge_archive_text(
+            existing,
+            tuple(additions),
+            f"# Progress Archive {year}",
+        )
+        outputs.append((bank / relative, merged))
     if note_target is not None and note_content is not None:
         outputs.append((note_target, note_content))
     if attention_content is not None:
         outputs.append((attention_path, attention_content))
-    return PreparedDone(tuple(outputs), note_relative)
+    if attention_archive_content is not None:
+        outputs.append((bank / "archive/attention.md", attention_archive_content))
+    return PreparedDone(
+        tuple(outputs),
+        note_relative,
+        roll.archived_count,
+        archived_attention,
+    )
 
 
 def apply_done(
@@ -598,4 +702,9 @@ def apply_done(
         for path, _ in prepared.outputs:
             path.parent.mkdir(parents=True, exist_ok=True)
         _write_all_or_rollback(prepared.outputs)
-        return ApplyResult(revision_function(bank), prepared.note_path)
+        return ApplyResult(
+            revision_function(bank),
+            prepared.note_path,
+            prepared.archived_entries,
+            prepared.archived_attention,
+        )

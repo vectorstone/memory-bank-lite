@@ -21,6 +21,9 @@ python3 <skill-dir>/scripts/mb.py --project-root "$PWD" <action>
 - `config set-vault <absolute-path>` validates and records a compatible
   `claude-obsidian` vault.
 - `init` creates or reuses a Project Bank without writing into the repository.
+  New Banks contain only the four core files (`status.md`, `checklist.md`,
+  `progress.md`, `attention.md`) plus `notes/`; `lessons.md` appears when the
+  first `distill` writes it. Existing Banks are never trimmed by init.
 - `init --adopt <project-id>` is read-only until the CLI output has been shown
   and the user explicitly confirms; only then pass `--confirm-adopt`.
 - `init --workspace --name <name>` first returns candidate members and writes
@@ -38,7 +41,9 @@ python3 <skill-dir>/scripts/mb.py --project-root "$PWD" <action>
 
 - `start` is strictly read-only. A Workspace start includes bounded member
   summaries.
-- `recall <query>` searches the current scope's Banks and bound published pages.
+- `recall <query>` searches the current scope's Banks (including `archive/`,
+  notes, and `lessons.md`) and bound published pages. Distilled lessons rank
+  above raw progress.
 - Add `--vault` only when the user explicitly requests full-vault search.
 - Use `--expand <result-id>` only after a result was returned or when the user
   explicitly supplies the ID.
@@ -90,6 +95,30 @@ Never bypass path containment, sensitive-content scanning, Bank revisions,
 locks, or compound transaction rollback. A one-shot `--allow-sensitive` may be
 passed only when the same user invocation explicitly authorizes it after seeing
 the finding.
+
+Every `done --apply` also performs housekeeping automatically: progress entries
+beyond 15 entries / 32 KB roll verbatim into `archive/progress-<year>.md`, and
+attention items that became resolved/superseded move to
+`archive/attention.md`. A `note` whose same-day filename already exists takes a
+`-2`, `-3`... suffix instead of failing. An `update` change may set `status`
+back to `active` to reactivate an archived item.
+
+## Compact And Distill
+
+- `compact` is explicit and preview-only until `--apply`. Show the preview
+  (entry/byte counts, what would roll, closed attention items) and only then
+  rerun with `--apply`. Content moves verbatim into `archive/`; nothing is
+  summarized or deleted. Use it for Banks that predate the automatic limits.
+  `--project-id <id>` may compact any catalog Project without a local binding.
+- `distill` promotes stable knowledge from progress entries into `lessons.md`:
+  1. Run `distill --revision --json` and read the returned entry markers and
+     titles.
+  2. Draft lessons as `{"title", "body", "sources": [entry markers]}` for
+     conclusions that stay true long after the session. Never distill current
+     tasks, next steps, or blockers.
+  3. Show the draft and obtain explicit confirmation, then pipe the payload to
+     `distill --apply --json`. Distill has no fast mode.
+- Distilled lessons are boosted above raw progress in recall.
 
 ## Publish
 

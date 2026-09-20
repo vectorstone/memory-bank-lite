@@ -12,6 +12,8 @@ from mb_lite.bindings import BindingStore
 from mb_lite.catalog import CatalogStore, generated_id, remote_project_id
 from mb_lite.config import resolve_runtime, write_vault_config
 from mb_lite.compound import CompoundUpdate, apply_compound_done, global_lock
+from mb_lite.compact import apply_compact, compact_preview
+from mb_lite.distill import DistillPayload, apply_distill, distill_snapshot
 from mb_lite.done import DonePayload, apply_done, bank_revision, v2_bank_revision
 from mb_lite.doctor import doctor_payload, run_doctor
 from mb_lite.errors import MbError
@@ -94,6 +96,18 @@ def _parser() -> argparse.ArgumentParser:
     recall.add_argument("--expand")
     recall.add_argument("--vault", action="store_true")
     recall.add_argument("--json", action="store_true")
+
+    compact = sub.add_parser("compact")
+    compact.add_argument("--apply", action="store_true")
+    compact.add_argument("--json", action="store_true")
+    compact.add_argument("--project-id")
+
+    distill = sub.add_parser("distill")
+    distill_mode = distill.add_mutually_exclusive_group(required=True)
+    distill_mode.add_argument("--revision", action="store_true")
+    distill_mode.add_argument("--apply", action="store_true")
+    distill.add_argument("--json", action="store_true")
+    distill.add_argument("--allow-sensitive", action="store_true")
 
     workspace = sub.add_parser("workspace")
     workspace_sub = workspace.add_subparsers(dest="workspace_action", required=True)
@@ -282,6 +296,19 @@ def _v2_dispatch(args: argparse.Namespace) -> int:
     vault = validate_vault_contract(runtime.vault)
     catalog = CatalogStore(vault, runtime.state_root)
     bindings = BindingStore(runtime.state_root)
+    if args.action == "compact":
+        if args.project_id:
+            record = catalog.project(args.project_id)
+            bank = contained_path(vault, record.bank_path, "memory-bank")
+        else:
+            scope = resolve_scope(args.project_root, catalog, bindings)
+            bank = scope.bank
+        if args.apply:
+            payload = apply_compact(bank)
+        else:
+            payload = compact_preview(bank)
+        print(json.dumps(payload, ensure_ascii=False) if args.json else json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
     if args.action == "migrate":
         legacy_home = args.legacy_home or Path(os.environ.get("MB_LITE_HOME", str(DEFAULT_HOME))).expanduser()
         items = plan_v2_migration(legacy_home, catalog)
@@ -367,6 +394,17 @@ def _v2_dispatch(args: argparse.Namespace) -> int:
         return 0
     scope = resolve_scope(args.project_root, catalog, bindings)
     validate_v2_bank(scope.bank)
+    if args.action == "distill":
+        if args.revision:
+            payload = distill_snapshot(scope.bank)
+        else:
+            raw = sys.stdin.read()
+            if not raw.strip():
+                raise MbError("distill --apply requires a confirmed JSON payload on stdin", 1)
+            enforce_safe_text(raw, args.allow_sensitive)
+            payload = apply_distill(scope.bank, DistillPayload.from_json(raw))
+        print(json.dumps(payload, ensure_ascii=False) if args.json else json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
     if args.action == "publish":
         allowed_ids = frozenset({scope.scope_id, *scope.members})
         def publish_roots(scope_type: str, scope_id: str) -> tuple[Path, ...]:
@@ -534,7 +572,12 @@ def _v2_dispatch(args: argparse.Namespace) -> int:
                 datetime.now(timezone.utc),
                 revision_function=v2_bank_revision,
             )
-        payload = {"bank_revision": result.revision, "note_path": result.note_path}
+        payload = {
+            "bank_revision": result.revision,
+            "note_path": result.note_path,
+            "archived_entries": result.archived_entries,
+            "archived_attention": result.archived_attention,
+        }
         print(json.dumps(payload, ensure_ascii=False) if args.json else "Memory saved.")
         return 0
     if args.action == "start":

@@ -45,11 +45,10 @@ def _managed(source: str) -> tuple[int, int, str]:
     return start, end, source[start + len(START):end - len(END)]
 
 
-def parse_attention(source: str) -> tuple[AttentionEntry, ...]:
-    _, _, body = _managed(source)
+def _entries_from_text(source: str, *, seen: set[str] | None = None) -> list[AttentionEntry]:
+    seen = seen if seen is not None else set()
     entries: list[AttentionEntry] = []
-    seen: set[str] = set()
-    for match in ENTRY_RE.finditer(body):
+    for match in ENTRY_RE.finditer(source):
         attention_id = match.group(1)
         if attention_id in seen:
             raise MbError(f"duplicate attention ID: {attention_id}", 4)
@@ -74,6 +73,17 @@ def parse_attention(source: str) -> tuple[AttentionEntry, ...]:
                 review_days,
             )
         )
+    return entries
+
+
+def parse_attention_entries(source: str) -> tuple[AttentionEntry, ...]:
+    """Lenient entry extraction; accepts archive files without managed blocks."""
+    return tuple(_entries_from_text(source))
+
+
+def parse_attention(source: str) -> tuple[AttentionEntry, ...]:
+    _, _, body = _managed(source)
+    entries = _entries_from_text(body)
     residue = ENTRY_RE.sub("", body)
     residue = re.sub(r"^\s*## Active Attention\s*", "", residue)
     if residue.strip():
@@ -110,3 +120,14 @@ def render_attention(source: str, entries: tuple[AttentionEntry, ...]) -> str:
 def next_attention_id(entries: tuple[AttentionEntry, ...]) -> str:
     highest = max((int(entry.attention_id.split("-")[1]) for entry in entries), default=0)
     return f"ATT-{highest + 1:03d}"
+
+
+ARCHIVE_HEADING = "# Attention Archive"
+
+
+def render_attention_archive(entries: tuple[AttentionEntry, ...]) -> str | None:
+    """Render closed items into the machine-managed archive file."""
+    if not entries:
+        return None
+    body = "\n\n".join(render_entry(entry).rstrip() for entry in entries)
+    return f"{ARCHIVE_HEADING}\n\n{body}\n"

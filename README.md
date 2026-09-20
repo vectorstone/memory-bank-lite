@@ -15,6 +15,8 @@ workspace add|remove PATH
 start [--section SECTION]
 done --revision|--apply
 recall QUERY [--vault|--expand ID]
+compact [--apply] [--project-id PROJECT_ID]
+distill --revision|--apply
 publish --snapshot|--preview|--apply
 doctor
 migrate --to-vault|--cleanup [--apply]
@@ -23,6 +25,14 @@ migrate --to-vault|--cleanup [--apply]
 Every action is opt-in. The installer adds only shared skill links and the thin
 Claude command wrapper. It does not add hooks, modify repositories, start
 background processes, or manage vault Git commits.
+
+New Banks contain only the four core files plus `notes/`. Every `done --apply`
+rolls progress entries beyond 15 entries / 32 KB verbatim into
+`archive/progress-<year>.md` and moves closed attention items into
+`archive/attention.md`, so Banks stay bounded without losing history; `recall`
+still searches the archive. `compact` applies the same housekeeping on demand
+to Banks that predate the limits, and `distill` promotes stable conclusions
+from progress entries into `lessons.md` (human-confirmed, boosted in recall).
 
 Workspace initialization previews candidate members before `--confirm-members`
 writes anything. If the exact Workspace root is already bound to a Project,

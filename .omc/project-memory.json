@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1784450431959,
+  "lastScanned": 1789916819159,
   "projectRoot": "/Users/wangxiaoguang/IdeaProjects/memory-bank-lite",
   "techStack": {
     "languages": [],
@@ -37,7 +37,7 @@
       "path": "commands",
       "purpose": null,
       "fileCount": 1,
-      "lastAccessed": 1784450431936,
+      "lastAccessed": 1789916819138,
       "keyFiles": [
         "mb.md"
       ]
@@ -46,7 +46,7 @@
       "path": "docs",
       "purpose": "Documentation",
       "fileCount": 1,
-      "lastAccessed": 1784450431943,
+      "lastAccessed": 1789916819138,
       "keyFiles": [
         "local-acceptance.md"
       ]
@@ -55,7 +55,7 @@
       "path": "scripts",
       "purpose": "Build/utility scripts",
       "fileCount": 2,
-      "lastAccessed": 1784450431944,
+      "lastAccessed": 1789916819138,
       "keyFiles": [
         "mb.py",
         "migrate_cleanup.py"
@@ -65,14 +65,14 @@
       "path": "templates",
       "purpose": null,
       "fileCount": 0,
-      "lastAccessed": 1784450431944,
+      "lastAccessed": 1789916819138,
       "keyFiles": []
     },
     "tests": {
       "path": "tests",
       "purpose": "Test files",
       "fileCount": 26,
-      "lastAccessed": 1784450431945,
+      "lastAccessed": 1789916819138,
       "keyFiles": [
         "__init__.py",
         "test_bank.py",

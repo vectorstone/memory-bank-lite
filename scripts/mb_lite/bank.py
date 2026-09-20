@@ -84,13 +84,7 @@ def _write_missing_file(descriptor: int, name: str, content: bytes) -> bool:
 def _populate_bank(descriptor: int) -> None:
     notes_descriptor = _ensure_directory(descriptor, "notes")
     os.close(notes_descriptor)
-    plans_descriptor = _ensure_directory(descriptor, "plans")
-    try:
-        done_descriptor = _ensure_directory(plans_descriptor, "done")
-        os.close(done_descriptor)
-    finally:
-        os.close(plans_descriptor)
-    for name in V2_CORE_FILES + OPTIONAL_FILES:
+    for name in V2_CORE_FILES:
         _write_missing_file(descriptor, name, _read_template(name))
     for name in CORE_FILES:
         read_file_at(descriptor, name).decode("utf-8")

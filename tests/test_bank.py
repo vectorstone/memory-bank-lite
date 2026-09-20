@@ -19,9 +19,10 @@ class BankTests(unittest.TestCase):
             bank = Path(temp_dir) / ".memory-bank"
             self.assertIsNone(initialize_bank(bank))
             self.assertTrue((bank / "notes").is_dir())
-            self.assertTrue((bank / "plans" / "done").is_dir())
-            for name in ("status.md", "checklist.md", "progress.md", "roadmap.md", "research.md", "backlog.md", "lessons.md"):
+            for name in ("status.md", "checklist.md", "progress.md", "attention.md"):
                 self.assertTrue((bank / name).is_file())
+            for name in ("plans", "lessons.md", "research.md", "backlog.md", "roadmap.md"):
+                self.assertFalse((bank / name).exists())
 
             status = bank / "status.md"
             status.write_bytes(b"# User Status\n")
