@@ -26,6 +26,16 @@ from .archive import (
 from .bank import CORE_FILES, validate_bank, validate_v2_bank
 from .bank_fs import bank_markdown_files, read_bank_file, read_bank_text
 from .errors import MbError
+from .handoff import (
+    FOCUS_MAX_CHARS,
+    HANDOFF_FILE,
+    NOTE_MAX_CHARS,
+    HandoffContext,
+    archive_header,
+    compose_handoff_file,
+    plan_handoff_archive,
+    render_handoff_body,
+)
 from .security import forbidden_evidence_path
 
 
@@ -74,6 +84,28 @@ def _string_list(data: dict[str, Any], field: str) -> tuple[str, ...]:
             raise MbError(f"{field} must contain non-empty strings", 1)
         items.append(stripped)
     return tuple(items)
+
+
+def _optional_text(data: dict[str, Any], field: str, max_chars: int) -> str:
+    """Read optional free text, bounded so it cannot become a second copy.
+
+    The bound is the mechanical half of "reference, do not copy": a field that
+    outgrows it is almost always restating a document the Bank already points
+    at, so the caller is told to reference the document instead.
+    """
+    value = data.get(field)
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise MbError(f"{field} must be a string", 1)
+    stripped = value.strip()
+    if len(stripped) > max_chars:
+        raise MbError(
+            f"{field} must stay within {max_chars} characters; "
+            "reference the document instead of copying it",
+            1,
+        )
+    return stripped
 
 
 @dataclass(frozen=True)
@@ -161,6 +193,8 @@ class DonePayload:
     new_items: tuple[str, ...]
     note: NotePayload | None
     attention_changes: tuple[AttentionChange, ...] = ()
+    handoff_focus: str = ""
+    handoff_note: str = ""
 
     @classmethod
     def from_json(cls, raw: str) -> "DonePayload":
@@ -210,6 +244,8 @@ class DonePayload:
             new_items=_string_list(data, "new_items"),
             note=note,
             attention_changes=_attention_changes(data),
+            handoff_focus=_optional_text(data, "handoff_focus", FOCUS_MAX_CHARS),
+            handoff_note=_optional_text(data, "handoff_note", NOTE_MAX_CHARS),
         )
 
 
@@ -354,16 +390,22 @@ def _bullet_section(
     return f"## {title}\n" + "\n".join(bullets)
 
 
+def entry_marker(timestamp: str, summary: str) -> str:
+    """Stable identifier for one done entry.
+
+    The handoff reuses this exact marker, so a handoff and the progress entry it
+    points at can always be joined back together.
+    """
+    marker_hash = sha256((timestamp + "\0" + summary).encode("utf-8")).hexdigest()[:8]
+    return f"{timestamp.replace('-', '').replace(':', '')}-{marker_hash}"
+
+
 def render_progress_entry(
     payload: DonePayload,
     timestamp: str,
     note_relative: str | None = None,
 ) -> str:
-    marker_hash = sha256(
-        (timestamp + "\0" + payload.summary).encode("utf-8"),
-    ).hexdigest()[:8]
-    compact = timestamp.replace("-", "").replace(":", "")
-    marker = f"{compact}-{marker_hash}"
+    marker = entry_marker(timestamp, payload.summary)
     heading_time = timestamp.replace("T", " ").removesuffix("Z")
     heading = f"### {heading_time} - {payload.summary}"
     if note_relative is not None:
@@ -385,6 +427,8 @@ class ApplyResult:
     note_path: str | None
     archived_entries: int = 0
     archived_attention: int = 0
+    handoff_path: str | None = None
+    archived_handoffs: int = 0
 
 
 @dataclass(frozen=True)
@@ -393,6 +437,8 @@ class PreparedDone:
     note_path: str | None
     archived_entries: int = 0
     archived_attention: int = 0
+    handoff_path: str | None = None
+    archived_handoffs: int = 0
 
 
 class BankWriteError(MbError):
@@ -603,6 +649,75 @@ def _note_target(bank: Path, now: datetime, title: str) -> tuple[str, Path]:
     raise MbError(f"unable to allocate note filename for: {title}", 1)
 
 
+def _active_attention_ids(source: str | None) -> tuple[str, ...]:
+    """List active attention IDs for the handoff's reference list.
+
+    The lenient parser is deliberate: an imperfect attention file should not
+    start failing ``done``, which is what a strict parse here would do. Doctor
+    already reports those Banks.
+    """
+    if not source:
+        return ()
+    return tuple(
+        entry.attention_id
+        for entry in parse_attention_entries(source)
+        if entry.status == "active"
+    )
+
+
+def _handoff_outputs(
+    bank: Path,
+    *,
+    timestamp: str,
+    payload: DonePayload,
+    checklist: str,
+    note_relative: str | None,
+    attention_source: str | None,
+) -> tuple[list[tuple[Path, str]], str, int]:
+    """Build the handoff file plus the archive append for a superseded one.
+
+    Every v2 Bank keeps a handoff, so a fresh agent can read one pointer-only
+    document instead of reconstructing the session from the whole Bank.
+    """
+    target = bank / HANDOFF_FILE
+    if target.is_symlink():
+        raise MbError(f"handoff must not be a symlink: {HANDOFF_FILE}", 4)
+    existing = read_bank_text(bank, HANDOFF_FILE)
+    context = HandoffContext(
+        timestamp=timestamp,
+        marker=entry_marker(timestamp, payload.summary),
+        summary=payload.summary,
+        focus=payload.handoff_focus,
+        note=payload.handoff_note,
+        key_files=payload.key_files,
+        note_relative=note_relative,
+        open_items=len(_unchecked_items(checklist)),
+        attention_ids=_active_attention_ids(attention_source),
+        lessons=read_bank_text(bank, "lessons.md") is not None,
+    )
+    outputs: list[tuple[Path, str]] = [
+        (target, compose_handoff_file(existing, render_handoff_body(context))),
+    ]
+    archive = plan_handoff_archive(existing, timestamp[:4])
+    if archive is None:
+        return outputs, HANDOFF_FILE, 0
+    relative, body = archive
+    archive_path = bank / relative
+    if archive_path.is_symlink():
+        raise MbError(f"handoff archive must not be a symlink: {relative}", 4)
+    outputs.append(
+        (
+            archive_path,
+            merge_archive_text(
+                read_bank_text(bank, relative),
+                (body,),
+                archive_header(relative),
+            ),
+        )
+    )
+    return outputs, HANDOFF_FILE, 1
+
+
 def prepare_done(bank: Path, repo: Path, payload: DonePayload, now: datetime) -> PreparedDone:
     validate_bank(bank)
     _validate_key_files(repo, payload.key_files)
@@ -632,6 +747,7 @@ def prepare_done(bank: Path, repo: Path, payload: DonePayload, now: datetime) ->
     entry = render_progress_entry(payload, timestamp, note_relative)
     roll = plan_progress_roll(progress_source + separator + "\n" + entry)
     attention_path = bank / "attention.md"
+    attention_source = read_bank_text(bank, "attention.md")
     attention_content: str | None = None
     attention_archive_content: str | None = None
     archived_attention = 0
@@ -676,11 +792,27 @@ def prepare_done(bank: Path, repo: Path, payload: DonePayload, now: datetime) ->
         outputs.append((attention_path, attention_content))
     if attention_archive_content is not None:
         outputs.append((bank / "archive/attention.md", attention_archive_content))
+    handoff_path: str | None = None
+    archived_handoffs = 0
+    # A Bank that owns attention.md is a v2 Bank, and every v2 Bank keeps a
+    # handoff. Legacy Banks are left byte-identical.
+    if attention_source is not None:
+        handoff_outputs, handoff_path, archived_handoffs = _handoff_outputs(
+            bank,
+            timestamp=timestamp,
+            payload=payload,
+            checklist=checklist,
+            note_relative=note_relative,
+            attention_source=attention_content if attention_content is not None else attention_source,
+        )
+        outputs.extend(handoff_outputs)
     return PreparedDone(
         tuple(outputs),
         note_relative,
         roll.archived_count,
         archived_attention,
+        handoff_path,
+        archived_handoffs,
     )
 
 
@@ -707,4 +839,6 @@ def apply_done(
             prepared.note_path,
             prepared.archived_entries,
             prepared.archived_attention,
+            prepared.handoff_path,
+            prepared.archived_handoffs,
         )

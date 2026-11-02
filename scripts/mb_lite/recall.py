@@ -40,6 +40,7 @@ _SOURCES = (
     "attention.md",
     "progress.md",
     "lessons.md",
+    "handoff.md",
     "backlog.md",
     "checklist.md",
     "roadmap.md",

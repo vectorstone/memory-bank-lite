@@ -6,8 +6,10 @@ from .attention import parse_attention
 from .bank import validate_bank, validate_v2_bank
 from .bank_fs import bank_markdown_files, read_bank_text
 from .errors import MbError
+from .handoff import HANDOFF_FILE, HANDOFF_HEADING, handoff_body
 
 MAX_BYTES = 8192
+HANDOFF_MAX_BYTES = 2048
 CURRENT_RE = re.compile(r"<!-- mb-lite:current:start -->(.*?)<!-- mb-lite:current:end -->", re.DOTALL)
 ENTRY_RE = re.compile(r"(?=<!-- mb-lite-entry:)(<!-- mb-lite-entry:[^>]+ -->.*?)(?=<!-- mb-lite-entry:|\Z)", re.DOTALL)
 STAGE_RE = re.compile(r"(?ms)^###\s+(Stage\s+\d+:\s*.+?)\s*$\n(.*?)(?=^###\s+Stage\s+\d+:|\Z)")
@@ -143,13 +145,61 @@ def _attention_context(bank: Path) -> list[str]:
     ]
 
 
+def _handoff_context(bank: Path) -> list[str]:
+    """Read the handoff block, minus the heading the start section already owns."""
+    source = read_bank_text(bank, HANDOFF_FILE)
+    if source is None:
+        return []
+    body = handoff_body(source)
+    if body is None:
+        return []
+    lines = body.splitlines()
+    if lines and lines[0].strip() == HANDOFF_HEADING:
+        lines = lines[1:]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    return [line.rstrip() for line in lines]
+
+
+def _insert_handoff(output: str, lines: list[str]) -> str:
+    """Insert the handoff section, dropping trailing lines under size pressure.
+
+    The handoff outranks the attention and member summaries that are appended
+    after it, because it is the first thing a fresh agent should read. Whole
+    lines are dropped and counted, never truncated mid-line.
+    """
+    if not lines:
+        return output
+    marker = "\n\n## Attention\n\n"
+    if marker not in output:
+        marker = "\n\n## Open Items\n\n"
+    visible = list(lines)
+    while visible:
+        omitted = len(lines) - len(visible)
+        body_lines = list(visible)
+        if omitted:
+            body_lines.append(f"- ... {omitted} handoff lines omitted; use start --section handoff")
+        body = "\n".join(body_lines)
+        candidate = output.replace(marker, f"\n\n## Handoff\n\n{body}{marker}", 1)
+        if len(body.encode("utf-8")) <= HANDOFF_MAX_BYTES and len(candidate.encode("utf-8")) <= MAX_BYTES:
+            return candidate
+        visible.pop()
+    return output
+
+
 def build_v2_start_context(bank: Path, section: str | None = None) -> str:
     validate_v2_bank(bank)
     attention = _attention_context(bank)
+    handoff = _handoff_context(bank)
     if section == "attention":
         output = "## attention\n\n" + ("\n".join(attention) if attention else "No active attention.") + "\n"
         if len(output.encode("utf-8")) > MAX_BYTES:
             raise MbError("start section attention exceeds 8192 bytes; use recall", 1)
+        return output
+    if section == "handoff":
+        output = "## handoff\n\n" + ("\n".join(handoff) if handoff else "No handoff recorded.") + "\n"
+        if len(output.encode("utf-8")) > MAX_BYTES:
+            raise MbError("start section handoff exceeds 8192 bytes; use recall", 1)
         return output
     base = build_start_context(bank, section)
     if section is not None:
@@ -157,11 +207,12 @@ def build_v2_start_context(bank: Path, section: str | None = None) -> str:
     if not attention:
         attention = ["No active attention."]
     marker = "\n\n## Open Items\n\n"
+    output = _insert_handoff(base, handoff)
     while True:
         block = "\n\n## Attention\n\n" + "\n".join(attention)
-        output = base.replace(marker, block + marker, 1)
-        if len(output.encode("utf-8")) <= MAX_BYTES:
-            return output
+        candidate = output.replace(marker, block + marker, 1)
+        if len(candidate.encode("utf-8")) <= MAX_BYTES:
+            return candidate
         if len(attention) <= 1:
             raise MbError("protected start sections exceed 8192 bytes after attention", 1)
         attention.pop()
