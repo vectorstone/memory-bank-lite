@@ -93,7 +93,7 @@ def _render(current, open_items, stage_title, stage_detail, recent, note_titles,
     return "\n\n".join(sections).rstrip() + "\n"
 
 
-def build_start_context(bank: Path, section: str | None = None) -> str:
+def build_start_context(bank: Path, section: str | None = None, *, max_bytes: int = MAX_BYTES) -> str:
     bank = Path(bank)
     validate_bank(bank)
     current = _current(read_bank_text(bank, "status.md", required=True) or "")
@@ -119,7 +119,11 @@ def build_start_context(bank: Path, section: str | None = None) -> str:
     if len(protected.encode("utf-8")) > MAX_BYTES:
         raise MbError(f"protected start sections exceed 8192 bytes (current={len(current.encode('utf-8'))}, open-items={len(open_items.encode('utf-8'))}); use start --section or recall", 1)
     trimmed = False
-    while len(_render(current, open_items, stage_title, stage_detail, recent, note_titles, trimmed).encode("utf-8")) > MAX_BYTES:
+    while True:
+        candidate = _render(current, open_items, stage_title, stage_detail, recent, note_titles, trimmed)
+        size = len(candidate.encode("utf-8"))
+        if size <= max_bytes:
+            return candidate
         trimmed = True
         if note_titles:
             note_titles.pop()
@@ -127,9 +131,12 @@ def build_start_context(bank: Path, section: str | None = None) -> str:
             recent.pop(0)
         elif stage_detail:
             stage_detail = ""
-        else:
+        elif size > MAX_BYTES:
             raise MbError("start output exceeds 8192 bytes after optional trimming", 1)
-    return _render(current, open_items, stage_title, stage_detail, recent, note_titles, trimmed)
+        else:
+            # Optional content is exhausted but the render still fits the hard cap:
+            # return it as-is so the caller can degrade the assembled tail.
+            return candidate
 
 
 def _attention_context(bank: Path) -> list[str]:
@@ -184,7 +191,60 @@ def _insert_handoff(output: str, lines: list[str]) -> str:
         if len(body.encode("utf-8")) <= HANDOFF_MAX_BYTES and len(candidate.encode("utf-8")) <= MAX_BYTES:
             return candidate
         visible.pop()
+    dropped = f"- ... {len(lines)} handoff lines omitted; use start --section handoff"
+    candidate = output.replace(marker, f"\n\n## Handoff\n\n{dropped}{marker}", 1)
+    if len(candidate.encode("utf-8")) <= MAX_BYTES:
+        return candidate
     return output
+
+
+def _omitted_attention_notice(count: int) -> str:
+    return f"- ... {count} attention items omitted; use start --section attention"
+
+
+def _insert_attention(output: str, attention: list[str]) -> str:
+    """Insert the attention block before Open Items, degrading under pressure.
+
+    Entries are dropped lowest-severity first (the list arrives sorted high to
+    low) and every drop is counted in an explicit notice, so nothing disappears
+    silently. Only a Bank whose protected sections leave no room for even the
+    notice fails closed, mirroring the protected-section contract.
+    """
+    marker = "\n\n## Open Items\n\n"
+    if marker not in output:
+        return output
+    for shown in range(len(attention), 0, -1):
+        lines = list(attention[:shown])
+        if shown < len(attention):
+            lines.append(_omitted_attention_notice(len(attention) - shown))
+        block = "\n\n## Attention\n\n" + "\n".join(lines)
+        candidate = output.replace(marker, block + marker, 1)
+        if len(candidate.encode("utf-8")) <= MAX_BYTES:
+            return candidate
+    notice_block = "\n\n## Attention\n\n" + _omitted_attention_notice(len(attention))
+    candidate = output.replace(marker, notice_block + marker, 1)
+    if len(candidate.encode("utf-8")) <= MAX_BYTES:
+        return candidate
+    raise MbError("protected start sections exceed 8192 bytes after attention", 1)
+
+
+def _handoff_reserve(lines: list[str]) -> int:
+    """Bytes the capped handoff section will claim in the assembled output."""
+    if not lines:
+        return 0
+    body = min(len("\n".join(lines).encode("utf-8")), HANDOFF_MAX_BYTES)
+    return len("\n\n## Handoff\n\n".encode("utf-8")) + body
+
+
+def _attention_reserve(lines: list[str]) -> int:
+    """Bytes guaranteed to the mandatory attention block: its heading plus room
+    for the shortest entry line and the omission notice."""
+    marker = len("\n\n## Attention\n\n".encode("utf-8"))
+    if not lines:
+        return marker + len("No active attention.".encode("utf-8"))
+    smallest = min(len(line.encode("utf-8")) for line in lines)
+    notice = len(_omitted_attention_notice(len(lines)).encode("utf-8"))
+    return marker + smallest + notice
 
 
 def build_v2_start_context(bank: Path, section: str | None = None) -> str:
@@ -201,21 +261,20 @@ def build_v2_start_context(bank: Path, section: str | None = None) -> str:
         if len(output.encode("utf-8")) > MAX_BYTES:
             raise MbError("start section handoff exceeds 8192 bytes; use recall", 1)
         return output
-    base = build_start_context(bank, section)
+    if section is None:
+        # Trim optional content against the cap minus the mandatory tail, so the
+        # v1 trim loop cannot pack recent progress up to the full cap and starve
+        # the handoff/attention block (2026-11-08 incident).
+        budget = MAX_BYTES - _handoff_reserve(handoff) - _attention_reserve(attention)
+        base = build_start_context(bank, None, max_bytes=budget)
+    else:
+        base = build_start_context(bank, section)
     if section is not None:
         return base
     if not attention:
         attention = ["No active attention."]
-    marker = "\n\n## Open Items\n\n"
     output = _insert_handoff(base, handoff)
-    while True:
-        block = "\n\n## Attention\n\n" + "\n".join(attention)
-        candidate = output.replace(marker, block + marker, 1)
-        if len(candidate.encode("utf-8")) <= MAX_BYTES:
-            return candidate
-        if len(attention) <= 1:
-            raise MbError("protected start sections exceed 8192 bytes after attention", 1)
-        attention.pop()
+    return _insert_attention(output, attention)
 
 
 def build_workspace_start_context(

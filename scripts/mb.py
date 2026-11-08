@@ -88,7 +88,7 @@ def _parser() -> argparse.ArgumentParser:
     start.add_argument("--json", action="store_true")
     start.add_argument(
         "--section",
-        choices=("current", "attention", "members", "open-items", "active-stage", "recent-progress", "notes"),
+        choices=("current", "attention", "handoff", "members", "open-items", "active-stage", "recent-progress", "notes"),
     )
 
     recall = sub.add_parser("recall")
@@ -207,7 +207,7 @@ def _legacy_dispatch(args: argparse.Namespace) -> int:
         return 0
     if args.action == "start":
         section = args.section
-        if section in {"attention", "members"}:
+        if section in {"attention", "handoff", "members"}:
             raise MbError(f"start section {section} requires v2", 1)
         context = build_start_context(bank, section)
         payload = {"repository_key": identity.key, "bank_path": str(bank), "context": context}

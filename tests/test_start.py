@@ -1,9 +1,13 @@
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 
+from scripts.mb_lite.attention import AttentionEntry, render_attention
+from scripts.mb_lite.bank import initialize_bank
 from scripts.mb_lite.errors import MbError
-from scripts.mb_lite.start import build_start_context
+from scripts.mb_lite.handoff import compose_handoff_file
+from scripts.mb_lite.start import build_start_context, build_v2_start_context
 
 
 class StartTests(unittest.TestCase):
@@ -117,6 +121,104 @@ class StartTests(unittest.TestCase):
             bank = self.make_bank(root, "", "", "")
             with self.assertRaises(MbError):
                 build_start_context(bank, "bad")
+
+
+class V2StartBudgetTests(unittest.TestCase):
+    """Regression tests for the 2026-11-08 start-budget incident.
+
+    ``build_v2_start_context`` used to hard-fail with "protected start sections
+    exceed 8192 bytes after attention" because the v1 trim loop packed optional
+    content (recent progress) up to the full 8192-byte cap without reserving the
+    mandatory handoff/attention tail, so the attention block could not fit even
+    one line. The tail must instead degrade explicitly with omission notices.
+    """
+
+    def make_v2_bank(self, root: Path) -> Path:
+        bank = Path(root) / ".memory-bank"
+        initialize_bank(bank)
+        (bank / "status.md").write_text(
+            "**Focus:** " + "f" * 1160 + "\n**Next:** ship it\n**Blockers:** None\n",
+            encoding="utf-8",
+        )
+        items = "\n".join(f"- [ ] open item {i:02d} " + "o" * 96 for i in range(1, 41))
+        (bank / "checklist.md").write_text("# Checklist\n\n" + items + "\n", encoding="utf-8")
+        entries = []
+        for index, total in enumerate((2719, 2716, 2103), start=1):
+            marker = f"<!-- mb-lite-entry:2026110{index}T120000Z-0000000{index} -->"
+            heading = f"### 2026-11-0{index} 12:00:00 - session summary {index}"
+            body = "p" * (total - len(marker) - len(heading) - 2)
+            entries.append(f"{marker}\n{heading}\n{body}")
+        (bank / "progress.md").write_text("\n\n".join(entries) + "\n", encoding="utf-8")
+        source = (bank / "attention.md").read_text(encoding="utf-8")
+        attention = tuple(
+            AttentionEntry(
+                f"ATT-{i:03d}",
+                f"topic {i} " + "t" * 140,
+                "project",
+                "high" if i == 1 else "medium",
+                "active",
+                "shared reason",
+                "evidence",
+                date(2026, 9, 14),
+                90,
+            )
+            for i in range(1, 10)
+        )
+        (bank / "attention.md").write_text(render_attention(source, attention), encoding="utf-8")
+        handoff_body = "### 2026-11-08 15:33:03 - deploy the release and verify production " + "h" * 1400
+        (bank / "handoff.md").write_text(compose_handoff_file(None, handoff_body), encoding="utf-8")
+        return bank
+
+    def test_incident_budget_degrades_instead_of_failing(self):
+        with tempfile.TemporaryDirectory() as root:
+            bank = self.make_v2_bank(Path(root))
+            output = build_v2_start_context(bank)
+            self.assertLessEqual(len(output.encode("utf-8")), 8192)
+            self.assertIn("## Attention", output)
+            self.assertIn("ATT-001", output)
+            self.assertIn("## Handoff", output)
+            before = {p: p.read_bytes() for p in bank.rglob("*") if p.is_file()}
+            build_v2_start_context(bank)
+            self.assertEqual(before, {p: p.read_bytes() for p in bank.rglob("*") if p.is_file()})
+
+    def test_attention_omission_is_counted_not_silent(self):
+        with tempfile.TemporaryDirectory() as root:
+            bank = self.make_v2_bank(Path(root))
+            source = (bank / "attention.md").read_text(encoding="utf-8")
+            attention = tuple(
+                AttentionEntry(
+                    f"ATT-{i:03d}",
+                    "short critical topic" if i == 1 else "t" * 400,
+                    "project",
+                    "high" if i == 1 else "medium",
+                    "active",
+                    "reason",
+                    "evidence",
+                    date(2026, 9, 14),
+                    90,
+                )
+                for i in range(1, 10)
+            )
+            (bank / "attention.md").write_text(render_attention(source, attention), encoding="utf-8")
+            output = build_v2_start_context(bank)
+            self.assertLessEqual(len(output.encode("utf-8")), 8192)
+            self.assertIn("ATT-001", output)
+            self.assertRegex(
+                output,
+                r"- \.\.\. [1-9] attention items omitted; use start --section attention",
+            )
+
+    def test_attention_still_fails_closed_when_protected_leaves_no_room(self):
+        with tempfile.TemporaryDirectory() as root:
+            bank = self.make_v2_bank(Path(root))
+            (bank / "status.md").write_text(
+                "**Focus:** " + "f" * 7970 + "\n**Next:** ship\n**Blockers:** None\n",
+                encoding="utf-8",
+            )
+            (bank / "checklist.md").write_text("# Checklist\n\n", encoding="utf-8")
+            with self.assertRaises(MbError) as ctx:
+                build_v2_start_context(bank)
+            self.assertIn("exceed 8192 bytes after attention", str(ctx.exception))
 
 
 if __name__ == "__main__":

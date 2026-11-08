@@ -50,6 +50,34 @@ class V2CliTest(unittest.TestCase):
             )
             self.assertEqual(len(json.loads(revision.stdout)["bank_revision"]), 64)
 
+    def test_start_section_handoff_is_selectable(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value)
+            vault = V2ConfigCatalogTest()._vault(root)
+            repo = self._repo(root, "git@github.com:example/repo.git")
+            env = {
+                **os.environ,
+                "MB_LITE_VAULT_PATH": str(vault),
+                "XDG_STATE_HOME": str(root / "state"),
+                "XDG_CONFIG_HOME": str(root / "config"),
+            }
+            initialized = subprocess.run(
+                ["python3", str(CLI), "--project-root", str(repo), "init", "--json"],
+                env=env, capture_output=True, text=True, check=True,
+            )
+            bank = Path(json.loads(initialized.stdout)["bank_path"])
+            (bank / "handoff.md").write_text(
+                "<!-- mb-lite:handoff:start -->\n## Latest Handoff\n\nresume from the deploy step\n<!-- mb-lite:handoff:end -->\n",
+                encoding="utf-8",
+            )
+            started = subprocess.run(
+                ["python3", str(CLI), "--project-root", str(repo), "start", "--section", "handoff", "--json"],
+                env=env, capture_output=True, text=True, check=True,
+            )
+            context = json.loads(started.stdout)["context"]
+            self.assertTrue(context.startswith("## handoff"), context)
+            self.assertIn("resume from the deploy step", context)
+
     def test_no_remote_second_device_requires_explicit_adopt(self) -> None:
         with tempfile.TemporaryDirectory() as value:
             root = Path(value)

@@ -67,6 +67,13 @@ class CliTest(unittest.TestCase):
             result = subprocess.run(["python3", str(CLI), "--project-root", str(repo), "start", "--section", "current"], env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0); self.assertIn("## current", result.stdout); self.assertNotIn("## Open Items", result.stdout)
 
+    def test_start_section_handoff_requires_v2(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); repo = self._repo(root); env = {**os.environ, "MB_LITE_HOME": str(root / "m")}
+            subprocess.run(["python3", str(CLI), "--project-root", str(repo), "init"], env=env, check=True, capture_output=True)
+            result = subprocess.run(["python3", str(CLI), "--project-root", str(repo), "start", "--section", "handoff"], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1); self.assertIn("start section handoff requires v2", result.stderr)
+
     def test_init_adopt_requires_confirmation_and_reuses_old_bank(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d); repo = self._repo(root, "git@github.com:example/old.git"); home = root / "m"; env = {**os.environ, "MB_LITE_HOME": str(home)}
