@@ -221,5 +221,44 @@ class V2StartBudgetTests(unittest.TestCase):
             self.assertIn("exceed 8192 bytes after attention", str(ctx.exception))
 
 
+class V2StartLessonsTests(unittest.TestCase):
+    def make_bank(self, root: Path) -> Path:
+        bank = Path(root) / ".memory-bank"
+        initialize_bank(bank)
+        (bank / "status.md").write_text(
+            "**Focus:** lessons visibility\n**Next:** ship\n**Blockers:** None\n",
+            encoding="utf-8",
+        )
+        blocks = [
+            f"<!-- mb-lite-lesson:LSN-{index:03d} -->\n"
+            f"### LSN-{index:03d} Lesson title {index}\n\nbody {index}"
+            for index in range(1, 6)
+        ]
+        (bank / "lessons.md").write_text(
+            "# Lessons\n\n<!-- mb-lite:lessons:start -->\n## Verified Lessons\n\n"
+            + "\n\n".join(blocks)
+            + "\n<!-- mb-lite:lessons:end -->\n",
+            encoding="utf-8",
+        )
+        return bank
+
+    def test_default_start_shows_a_bounded_lessons_summary(self):
+        with tempfile.TemporaryDirectory() as root:
+            bank = self.make_bank(Path(root))
+            output = build_v2_start_context(bank)
+            self.assertLessEqual(len(output.encode("utf-8")), 8192)
+            self.assertIn("## Verified Lessons", output)
+            self.assertIn("LSN-001 Lesson title 1", output)
+            self.assertIn("LSN-003 Lesson title 3", output)
+            self.assertNotIn("LSN-004", output)
+            self.assertIn("2 more lessons; use start --section lessons", output)
+
+    def test_lessons_section_returns_every_distilled_lesson(self):
+        with tempfile.TemporaryDirectory() as root:
+            bank = self.make_bank(Path(root))
+            output = build_v2_start_context(bank, "lessons")
+            self.assertIn("LSN-005 Lesson title 5", output)
+
+
 if __name__ == "__main__":
     unittest.main()

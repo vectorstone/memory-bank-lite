@@ -19,7 +19,8 @@ python3 <skill-dir>/scripts/mb.py --project-root "$PWD" <action>
 ## Configuration And Init
 
 - `config set-vault <absolute-path>` validates and records a compatible
-  `claude-obsidian` vault.
+  `claude-obsidian` vault. `config show` is read-only and reports the active
+  vault path plus whether it came from `MB_LITE_VAULT_PATH` or `config.json`.
 - `init` creates or reuses a Project Bank without writing into the repository.
   New Banks contain only the four core files (`status.md`, `checklist.md`,
   `progress.md`, `attention.md`) plus `notes/`; `lessons.md` appears when the
@@ -40,13 +41,17 @@ python3 <skill-dir>/scripts/mb.py --project-root "$PWD" <action>
 ## Start And Recall
 
 - `start` is strictly read-only. A Workspace start includes bounded member
-  summaries.
+  summaries. A Project start shows at most three distilled lesson titles plus an
+  omission count; `start --section lessons` returns the full lesson list.
 - `recall <query>` searches the current scope's Banks (including `archive/`,
-  notes, and `lessons.md`) and bound published pages. Distilled lessons rank
-  above raw progress.
-- Add `--vault` only when the user explicitly requests full-vault search.
-- Use `--expand <result-id>` only after a result was returned or when the user
-  explicitly supplies the ID.
+  notes, and `lessons.md`) and bound published pages. Distilled lessons form the
+  first result tier, ahead of every raw progress chunk.
+- Add `--vault` only when the user explicitly requests full-vault search. Add
+  `--all-banks` only when the user explicitly requests read-only search across
+  every catalog Project Bank; results then also show their scope id.
+- `recall --expand <result-id>` caps the expanded section at 8192 bytes and
+  names the file that holds the rest. Use it only after a result was returned or
+  when the user explicitly supplies the ID.
 
 ## Done
 
@@ -112,13 +117,18 @@ back to `active` to reactivate an archived item.
   `--project-id <id>` may compact any catalog Project without a local binding.
 - `distill` promotes stable knowledge from progress entries into `lessons.md`:
   1. Run `distill --revision --json` and read the returned entry markers and
-     titles.
+     existing `lessons` (id plus title).
   2. Draft lessons as `{"title", "body", "sources": [entry markers]}` for
      conclusions that stay true long after the session. Never distill current
      tasks, next steps, or blockers.
-  3. Show the draft and obtain explicit confirmation, then pipe the payload to
-     `distill --apply --json`. Distill has no fast mode.
-- Distilled lessons are boosted above raw progress in recall.
+  3. To remove a wrong or stale lesson, use the top-level `retire` list of lesson
+     ids. To replace one with corrected wording, set `"replaces": "LSN-..."` on
+     the new lesson. Near-duplicate titles are rejected; merge them or use
+     `replaces` deliberately.
+  4. Show the draft and obtain explicit confirmation, then pipe the payload to
+     `distill --apply --json`. Distill has no fast mode. Everything inside the
+     managed block is owned by distill; keep manual notes outside it.
+- Distilled lessons rank above raw progress in recall.
 
 ## Publish
 

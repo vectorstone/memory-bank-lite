@@ -10,6 +10,8 @@ from .handoff import HANDOFF_FILE, HANDOFF_HEADING, handoff_body
 
 MAX_BYTES = 8192
 HANDOFF_MAX_BYTES = 2048
+LESSON_SUMMARY_MAX = 3
+LESSON_TITLE_RE = re.compile(r"(?m)^###\s+(LSN-[0-9]{3,})\s+(.+?)\s*$")
 CURRENT_RE = re.compile(r"<!-- mb-lite:current:start -->(.*?)<!-- mb-lite:current:end -->", re.DOTALL)
 ENTRY_RE = re.compile(r"(?=<!-- mb-lite-entry:)(<!-- mb-lite-entry:[^>]+ -->.*?)(?=<!-- mb-lite-entry:|\Z)", re.DOTALL)
 STAGE_RE = re.compile(r"(?ms)^###\s+(Stage\s+\d+:\s*.+?)\s*$\n(.*?)(?=^###\s+Stage\s+\d+:|\Z)")
@@ -60,6 +62,27 @@ def _note_titles(bank: Path, focus: str, stage_title: str) -> list[str]:
     return result
 
 
+def _lesson_lines(bank: Path) -> list[str]:
+    source = read_bank_text(bank, "lessons.md")
+    if source is None:
+        return []
+    return [
+        f"- {lesson_id} {title}"
+        for lesson_id, title in LESSON_TITLE_RE.findall(source)
+    ]
+
+
+def _lesson_summary(lines: list[str], limit: int = LESSON_SUMMARY_MAX) -> list[str]:
+    """Bounded stable conclusions, always with an omission count when truncated."""
+    if limit <= 0:
+        return []
+    shown = lines[:limit]
+    omitted = len(lines) - len(shown)
+    if omitted:
+        shown = [*shown, f"- ... {omitted} more lessons; use start --section lessons"]
+    return shown
+
+
 def _recent(progress: str) -> list[str]:
     lite = [match.group(1).strip() for match in ENTRY_RE.finditer(progress)]
     if len(lite) >= 3:
@@ -77,13 +100,15 @@ def _recent(progress: str) -> list[str]:
     return legacy[-(3 - len(lite)):] + lite
 
 
-def _render(current, open_items, stage_title, stage_detail, recent, note_titles, trimmed):
+def _render(current, open_items, stage_title, stage_detail, lessons, recent, note_titles, trimmed):
     sections = ["# Memory Bank", "## Current", current, "## Open Items", open_items]
     if stage_title:
         stage = f"### {stage_title}"
         if stage_detail:
             stage += "\n" + stage_detail
         sections.extend(("## Active Stage", stage))
+    if lessons:
+        sections.extend(("## Verified Lessons", "\n".join(lessons)))
     if recent:
         sections.extend(("## Recent Progress", "\n\n".join(recent)))
     if note_titles:
@@ -100,11 +125,15 @@ def build_start_context(bank: Path, section: str | None = None, *, max_bytes: in
     open_items = _open_items(read_bank_text(bank, "checklist.md", required=True) or "")
     recent = _recent(read_bank_text(bank, "progress.md", required=True) or "")
     stage_title, stage_detail = _active_stage(bank)
+    all_lessons = _lesson_lines(bank)
+    lesson_limit = LESSON_SUMMARY_MAX
+    lessons = _lesson_summary(all_lessons, lesson_limit)
     note_titles = _note_titles(bank, _focus(current), stage_title)
     values = {
         "current": current,
         "open-items": open_items,
         "active-stage": f"### {stage_title}\n{stage_detail}".rstrip() if stage_title else "No active stage.",
+        "lessons": "\n".join(all_lessons) or "No distilled lessons.",
         "recent-progress": "\n\n".join(recent) or "No recent progress.",
         "notes": "\n".join(f"- {title}" for title in note_titles) or "No matching notes.",
     }
@@ -115,12 +144,12 @@ def build_start_context(bank: Path, section: str | None = None, *, max_bytes: in
         if len(output.encode("utf-8")) > MAX_BYTES:
             raise MbError(f"start section {section} exceeds 8192 bytes; use recall", 1)
         return output
-    protected = _render(current, open_items, "", "", [], [], False)
+    protected = _render(current, open_items, "", "", [], [], [], False)
     if len(protected.encode("utf-8")) > MAX_BYTES:
         raise MbError(f"protected start sections exceed 8192 bytes (current={len(current.encode('utf-8'))}, open-items={len(open_items.encode('utf-8'))}); use start --section or recall", 1)
     trimmed = False
     while True:
-        candidate = _render(current, open_items, stage_title, stage_detail, recent, note_titles, trimmed)
+        candidate = _render(current, open_items, stage_title, stage_detail, lessons, recent, note_titles, trimmed)
         size = len(candidate.encode("utf-8"))
         if size <= max_bytes:
             return candidate
@@ -131,6 +160,9 @@ def build_start_context(bank: Path, section: str | None = None, *, max_bytes: in
             recent.pop(0)
         elif stage_detail:
             stage_detail = ""
+        elif lesson_limit:
+            lesson_limit -= 1
+            lessons = _lesson_summary(all_lessons, lesson_limit)
         elif size > MAX_BYTES:
             raise MbError("start output exceeds 8192 bytes after optional trimming", 1)
         else:

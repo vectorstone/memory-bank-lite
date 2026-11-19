@@ -20,7 +20,14 @@ from mb_lite.errors import MbError
 from mb_lite.frontmatter import scalar, split_frontmatter
 from mb_lite.identity import resolve_identity
 from mb_lite.git_evidence import collect_git_evidence
-from mb_lite.recall import bank_documents, document_expand, document_search, expand_result, search
+from mb_lite.recall import (
+    bank_documents,
+    bound_expand,
+    document_expand,
+    document_search,
+    expand_result,
+    search,
+)
 from mb_lite.registry import RegistryStore
 from mb_lite.scope import resolve_scope
 from mb_lite.security import enforce_safe_text
@@ -32,7 +39,12 @@ from mb_lite.migrate_v2 import (
     migration_preview,
     plan_v2_migration,
 )
-from mb_lite.start import build_start_context, build_v2_start_context, build_workspace_start_context
+from mb_lite.start import (
+    MAX_BYTES,
+    build_start_context,
+    build_v2_start_context,
+    build_workspace_start_context,
+)
 from mb_lite.vault import contained_path, validate_vault_contract
 from mb_lite.workspace import (
     candidate_members,
@@ -66,6 +78,8 @@ def _parser() -> argparse.ArgumentParser:
     set_vault = config_sub.add_parser("set-vault")
     set_vault.add_argument("path", type=Path)
     set_vault.add_argument("--json", action="store_true")
+    show_config = config_sub.add_parser("show")
+    show_config.add_argument("--json", action="store_true")
 
     init = sub.add_parser("init")
     init.add_argument("--json", action="store_true")
@@ -88,13 +102,14 @@ def _parser() -> argparse.ArgumentParser:
     start.add_argument("--json", action="store_true")
     start.add_argument(
         "--section",
-        choices=("current", "attention", "handoff", "members", "open-items", "active-stage", "recent-progress", "notes"),
+        choices=("current", "attention", "handoff", "lessons", "members", "open-items", "active-stage", "recent-progress", "notes"),
     )
 
     recall = sub.add_parser("recall")
     recall.add_argument("query", nargs="?")
     recall.add_argument("--expand")
     recall.add_argument("--vault", action="store_true")
+    recall.add_argument("--all-banks", action="store_true")
     recall.add_argument("--json", action="store_true")
 
     compact = sub.add_parser("compact")
@@ -216,13 +231,18 @@ def _legacy_dispatch(args: argparse.Namespace) -> int:
     if args.action == "recall":
         if args.vault:
             raise MbError("recall --vault requires v2", 1)
+        if args.all_banks:
+            raise MbError("recall --all-banks requires v2", 1)
         if args.expand:
             result = expand_result(bank, args.expand)
-            print(json.dumps(asdict(result), ensure_ascii=False) if args.json else result.snippet)
+            snippet = bound_expand(result.snippet, str(bank / result.path), MAX_BYTES - 1)
+            print(json.dumps({**asdict(result), "snippet": snippet}, ensure_ascii=False) if args.json else snippet)
             return 0
         results = search(bank, args.query or "")
         if args.json:
             print(json.dumps([asdict(result) for result in results], ensure_ascii=False))
+        elif not results:
+            print("No recall matches in this Bank; it has not saved matching content.")
         else:
             for result in results:
                 print(f"{result.result_id} | {result.path} | {result.heading} | {result.snippet}")
@@ -615,12 +635,21 @@ def _v2_dispatch(args: argparse.Namespace) -> int:
         print(json.dumps(payload, ensure_ascii=False) if args.json else context, end="" if not args.json else "\n")
         return 0
     if args.action == "recall":
+        bank_roots = {scope.scope_id: scope.bank}
         documents = list(bank_documents(scope.bank, scope.scope_id))
         if scope.scope_type == "workspace":
             for project_id in scope.members:
                 record = catalog.project(project_id)
                 member_bank = contained_path(vault, record.bank_path, "memory-bank")
                 documents.extend(bank_documents(member_bank, project_id))
+                bank_roots[project_id] = member_bank
+        if args.all_banks:
+            for record in catalog.projects():
+                if record.project_id in bank_roots:
+                    continue
+                record_bank = contained_path(vault, record.bank_path, "memory-bank")
+                documents.extend(bank_documents(record_bank, record.project_id))
+                bank_roots[record.project_id] = record_bank
         allowed_scope_ids = {scope.scope_id, *scope.members}
         if args.vault:
             wiki_files = sorted((vault / "wiki").rglob("*.md"))
@@ -648,14 +677,23 @@ def _v2_dispatch(args: argparse.Namespace) -> int:
             documents.append((layer, page_scope_id, relative, text))
         if args.expand:
             result = document_expand(tuple(documents), args.expand)
-            print(json.dumps(asdict(result), ensure_ascii=False) if args.json else result.snippet)
+            root = bank_roots[result.scope_id] if result.layer == "bank" else vault
+            snippet = bound_expand(result.snippet, str(root / result.path), MAX_BYTES - 1)
+            if args.json:
+                print(json.dumps({**asdict(result), "snippet": snippet}, ensure_ascii=False))
+            else:
+                print(snippet)
             return 0
         results = document_search(tuple(documents), args.query or "")
         if args.json:
             print(json.dumps([asdict(result) for result in results], ensure_ascii=False))
+        elif not results:
+            where = "all Banks" if args.all_banks else f"scope {scope.scope_id}"
+            print(f"No recall matches in {where}; no saved content matches this query.")
         else:
             for result in results:
-                print(f"{result.result_id} | {result.path} | {result.heading} | {result.snippet}")
+                scope_column = f"{result.scope_id} | " if args.all_banks else ""
+                print(f"{result.result_id} | {scope_column}{result.path} | {result.heading} | {result.snippet}")
         return 0
     raise MbError(f"unsupported v2 action: {args.action}", 1)
 
@@ -663,10 +701,27 @@ def _v2_dispatch(args: argparse.Namespace) -> int:
 def main(argv=None) -> int:
     args = _parser().parse_args(argv)
     if args.action == "config":
-        vault = validate_vault_contract(args.path)
-        path = write_vault_config(vault)
-        payload = {"config_path": str(path), "vault_path": str(vault)}
-        print(json.dumps(payload, ensure_ascii=False) if args.json else f"Configured {vault}")
+        if args.config_action == "set-vault":
+            vault = validate_vault_contract(args.path)
+            path = write_vault_config(vault)
+            payload = {"config_path": str(path), "vault_path": str(vault)}
+            print(json.dumps(payload, ensure_ascii=False) if args.json else f"Configured {vault}")
+            return 0
+        runtime = resolve_runtime()
+        source = (
+            "MB_LITE_VAULT_PATH"
+            if os.environ.get("MB_LITE_VAULT_PATH", "").strip()
+            else "config.json"
+        )
+        payload = {
+            "vault_path": str(runtime.vault),
+            "config_path": str(runtime.config_root / "config.json"),
+            "source": source,
+        }
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False))
+        else:
+            print(f"Vault: {payload['vault_path']}\nSource: {payload['source']}")
         return 0
     if _legacy_mode():
         return _legacy_dispatch(args)

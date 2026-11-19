@@ -7,6 +7,7 @@ them above raw progress.
 """
 
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 import json
 from pathlib import Path
 import re
@@ -20,8 +21,16 @@ from .errors import MbError
 
 LESSONS_START = "<!-- mb-lite:lessons:start -->"
 LESSONS_END = "<!-- mb-lite:lessons:end -->"
-LESSON_ID_RE = re.compile(r"<!-- mb-lite-lesson:(LSN-[0-9]{3,}) -->")
-LESSON_TITLE_RE = re.compile(r"(?m)^###\s+LSN-[0-9]{3,}\s+(.+?)\s*$")
+LESSON_ID_PATTERN = re.compile(r"LSN-[0-9]{3,}")
+LESSON_SEQ_RE = re.compile(r"<!-- mb-lite-lesson-seq:([0-9]+) -->")
+STORED_LESSON_RE = re.compile(
+    r"(?ms)^<!-- mb-lite-lesson:(LSN-[0-9]{3,}) -->\s*"
+    r"###\s+LSN-[0-9]{3,}\s+(.+?)[ \t]*\r?$\s*"
+    r".*?(?=^<!-- mb-lite-lesson:|^###\s+LSN-[0-9]{3,}\s|^#{1,2}\s"
+    r"|^<!-- mb-lite:lessons:end -->|\Z)"
+)
+LESSON_TITLE_RE = re.compile(r"(?m)^###\s+(LSN-[0-9]{3,})\s+(.+?)\s*$")
+NEAR_DUPLICATE_RATIO = 0.85
 
 
 @dataclass(frozen=True)
@@ -29,12 +38,14 @@ class Lesson:
     title: str
     body: str
     sources: tuple[str, ...]
+    replaces: str | None = None
 
 
 @dataclass(frozen=True)
 class DistillPayload:
     bank_revision: str
     lessons: tuple[Lesson, ...]
+    retire: tuple[str, ...] = ()
 
     @classmethod
     def from_json(cls, raw: str) -> "DistillPayload":
@@ -47,9 +58,19 @@ class DistillPayload:
         revision = data.get("bank_revision")
         if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{64}", revision):
             raise MbError("bank_revision must be a lowercase SHA-256", 1)
-        raw_lessons = data.get("lessons")
-        if not isinstance(raw_lessons, list) or not raw_lessons:
-            raise MbError("distill payload requires lessons", 1)
+        raw_lessons = data.get("lessons", [])
+        if not isinstance(raw_lessons, list):
+            raise MbError("distill payload lessons must be a list", 1)
+        raw_retire = data.get("retire", [])
+        if not isinstance(raw_retire, list):
+            raise MbError("distill payload retire must be a list of lesson ids", 1)
+        retire: list[str] = []
+        for value in raw_retire:
+            if not isinstance(value, str) or not LESSON_ID_PATTERN.fullmatch(value.strip()):
+                raise MbError(f"invalid lesson id: {value}", 1)
+            retire.append(value.strip())
+        if len(set(retire)) != len(retire):
+            raise MbError("distill payload retire contains duplicate lesson ids", 1)
         lessons: list[Lesson] = []
         seen_titles: set[str] = set()
         for value in raw_lessons:
@@ -61,6 +82,13 @@ class DistillPayload:
                 raise MbError("lesson title must be a non-empty single line", 1)
             if not isinstance(body, str) or not body.strip():
                 raise MbError("lesson body must be non-empty", 1)
+            if any(
+                marker in title or marker in body
+                for marker in (LESSONS_START, LESSONS_END, "<!-- mb-lite-lesson:")
+            ):
+                raise MbError(
+                    "lesson title and body must not contain managed-block markers", 1
+                )
             if title.strip() in seen_titles:
                 raise MbError(f"duplicate lesson title: {title.strip()}", 1)
             seen_titles.add(title.strip())
@@ -72,8 +100,97 @@ class DistillPayload:
                 if not isinstance(marker, str) or not ENTRY_RE.fullmatch(marker.strip()):
                     raise MbError(f"invalid entry marker: {marker}", 1)
                 sources.append(marker.strip())
-            lessons.append(Lesson(title.strip(), body.strip(), tuple(sources)))
-        return cls(revision, tuple(lessons))
+            replaces = value.get("replaces")
+            if replaces is not None:
+                if not isinstance(replaces, str) or not LESSON_ID_PATTERN.fullmatch(replaces.strip()):
+                    raise MbError(f"invalid replacement lesson id: {replaces}", 1)
+                replaces = replaces.strip()
+            lessons.append(Lesson(title.strip(), body.strip(), tuple(sources), replaces))
+        if not lessons and not retire:
+            raise MbError("distill payload requires lessons or retire", 1)
+        return cls(revision, tuple(lessons), tuple(retire))
+
+
+@dataclass(frozen=True)
+class StoredLesson:
+    lesson_id: str
+    title: str
+    segment: str
+    managed: bool = True
+
+
+def _stored_lessons(source: str) -> list[StoredLesson]:
+    if LESSONS_START not in source or LESSONS_END not in source:
+        return []
+    start = source.index(LESSONS_START) + len(LESSONS_START)
+    end = source.index(LESSONS_END)
+    return [
+        StoredLesson(match.group(1), match.group(2).strip(), match.group(0))
+        for match in STORED_LESSON_RE.finditer(source[start:end])
+    ]
+
+
+def _all_lessons(source: str) -> list[StoredLesson]:
+    """Every LSN heading in the file, including hand-written unmanaged ones."""
+    managed = {lesson.lesson_id: lesson for lesson in _stored_lessons(source)}
+    result: list[StoredLesson] = []
+    for match in LESSON_TITLE_RE.finditer(source):
+        lesson_id = match.group(1)
+        result.append(
+            managed.get(
+                lesson_id,
+                StoredLesson(lesson_id, match.group(2).strip(), "", False),
+            )
+        )
+    return result
+
+
+def _normalized_title(title: str) -> str:
+    return " ".join(title.casefold().split())
+
+
+def _title_similarity(left: str, right: str) -> float:
+    first, second = _normalized_title(left), _normalized_title(right)
+    if not first or not second:
+        return 0.0
+    if first == second:
+        return 1.0
+    return SequenceMatcher(None, first, second).ratio()
+
+
+def _check_lesson_titles(lessons: tuple[Lesson, ...], remaining: list[StoredLesson]) -> None:
+    for index, lesson in enumerate(lessons):
+        for stored in remaining:
+            if _title_similarity(lesson.title, stored.title) < NEAR_DUPLICATE_RATIO:
+                continue
+            if _normalized_title(lesson.title) == _normalized_title(stored.title):
+                override = (
+                    f"set \"replaces\": \"{stored.lesson_id}\" to override it"
+                    if stored.managed
+                    else "merge it or edit lessons.md manually"
+                )
+                raise MbError(
+                    f"lesson already exists: {stored.lesson_id} {stored.title}; "
+                    f"{override}",
+                    3,
+                )
+            override = (
+                f"merge it or set \"replaces\": \"{stored.lesson_id}\""
+                if stored.managed
+                else "merge it or edit lessons.md manually"
+            )
+            raise MbError(
+                f"lesson {lesson.title!r} is too similar to existing "
+                f"{stored.lesson_id} ({stored.title!r}); {override}",
+                3,
+            )
+        for other in lessons[:index]:
+            if _title_similarity(lesson.title, other.title) >= NEAR_DUPLICATE_RATIO:
+                raise MbError(
+                    f"lesson titles are too similar within the payload: "
+                    f"{other.title!r} and {lesson.title!r}",
+                    1,
+                )
 
 
 def _source_entries(bank: Path) -> list[tuple[str, ProgressEntry]]:
@@ -92,11 +209,16 @@ def _source_entries(bank: Path) -> list[tuple[str, ProgressEntry]]:
 def distill_snapshot(bank: Path) -> dict[str, Any]:
     bank = validate_v2_bank(Path(bank))
     entries = _source_entries(bank)
+    lessons_source = read_bank_text(bank, "lessons.md") or ""
+    stored = _stored_lessons(lessons_source)
     return {
         "bank_path": str(bank),
         "bank_revision": v2_bank_revision(bank),
         "lessons_file_present": read_bank_text(bank, "lessons.md") is not None,
-        "lesson_count": len(LESSON_ID_RE.findall(read_bank_text(bank, "lessons.md") or "")),
+        "lesson_count": len(stored),
+        "lessons": [
+            {"id": lesson.lesson_id, "title": lesson.title} for lesson in stored
+        ],
         "entries": [
             {"source": source, "marker": entry.marker, "title": entry.title}
             for source, entry in entries
@@ -117,6 +239,42 @@ def _render_lesson(lesson_id: str, lesson: Lesson) -> str:
     return "\n".join(lines)
 
 
+def _rewrite_block(source: str, retired: set[str], additions: str) -> str:
+    start = source.index(LESSONS_START)
+    end = source.index(LESSONS_END, start)
+    inner = source[start + len(LESSONS_START):end]
+    pieces: list[str] = []
+    cursor = 0
+    for match in STORED_LESSON_RE.finditer(inner):
+        # Re-emit unmatched text verbatim so manual edits inside the block are
+        # never silently deleted.
+        pieces.append(inner[cursor:match.start()])
+        if match.group(1) not in retired:
+            pieces.append(match.group(0))
+        cursor = match.end()
+    pieces.append(inner[cursor:])
+    body = "".join(pieces).rstrip("\n")
+    if additions:
+        body = (body + "\n\n" if body else "") + additions
+    new_inner = body + "\n" if body else "\n"
+    return source[:start] + LESSONS_START + new_inner + LESSONS_END + source[end + len(LESSONS_END):]
+
+
+def _stamp_sequence(content: str, value: int) -> str:
+    """Persist the highest lesson id ever issued so retirement never recycles ids."""
+    marker = f"<!-- mb-lite-lesson-seq:{value:03d} -->"
+    position = content.index(LESSONS_START) + len(LESSONS_START)
+    end = content.index(LESSONS_END, position)
+    block = content[position:end]
+    boundary = block.find("<!-- mb-lite-lesson:")
+    header, tail = (block, "") if boundary < 0 else (block[:boundary], block[boundary:])
+    if LESSON_SEQ_RE.search(header):
+        header = LESSON_SEQ_RE.sub(marker, header, count=1)
+    else:
+        header = f"\n{marker}" + header
+    return content[:position] + header + tail + content[end:]
+
+
 def apply_distill(
     bank: Path,
     payload: DistillPayload,
@@ -124,8 +282,8 @@ def apply_distill(
     revision_function=v2_bank_revision,
 ) -> dict[str, Any]:
     bank = validate_v2_bank(Path(bank))
-    if not payload.lessons:
-        raise MbError("distill payload requires lessons", 1)
+    if not payload.lessons and not payload.retire:
+        raise MbError("distill payload requires lessons or retire", 1)
     with _bank_lock(bank):
         if revision_function(bank) != payload.bank_revision:
             raise MbError("Bank revision changed; regenerate the distill draft", 3)
@@ -135,13 +293,37 @@ def apply_distill(
                 if marker not in known_markers:
                     raise MbError(f"unknown source entry marker: {marker}", 1)
         source = read_bank_text(bank, "lessons.md")
-        existing_titles = set(LESSON_TITLE_RE.findall(source or ""))
-        for lesson in payload.lessons:
-            if lesson.title in existing_titles:
-                raise MbError(f"lesson already exists: {lesson.title}", 3)
-        highest = max(
-            (int(marker.split("-")[1]) for marker in LESSON_ID_RE.findall(source or "")),
+        all_source = source or ""
+        all_lessons = _all_lessons(all_source)
+        managed_ids = {lesson.lesson_id for lesson in all_lessons if lesson.managed}
+        retire_ids = set(payload.retire) | {
+            lesson.replaces for lesson in payload.lessons if lesson.replaces
+        }
+        unknown = sorted(
+            retire_ids - {lesson.lesson_id for lesson in all_lessons}
+        )
+        if unknown:
+            raise MbError(f"unknown lesson id: {', '.join(unknown)}", 1)
+        unmanaged = sorted(retire_ids - managed_ids)
+        if unmanaged:
+            raise MbError(
+                f"lesson is not managed: {', '.join(unmanaged)}; edit lessons.md manually",
+                1,
+            )
+        remaining = [
+            lesson for lesson in all_lessons if lesson.lesson_id not in retire_ids
+        ]
+        _check_lesson_titles(payload.lessons, remaining)
+        sequence = max(
+            (int(match.group(1)) for match in LESSON_SEQ_RE.finditer(all_source)),
             default=0,
+        )
+        highest = max(
+            sequence,
+            max(
+                (int(lesson.lesson_id.split("-")[1]) for lesson in all_lessons),
+                default=0,
+            ),
         )
         rendered: list[str] = []
         ids: list[str] = []
@@ -158,12 +340,12 @@ def apply_distill(
         elif LESSONS_START in source:
             if source.count(LESSONS_START) != 1 or source.count(LESSONS_END) != 1:
                 raise MbError("lessons.md must contain exactly one managed block", 4)
-            position = source.index(LESSONS_END)
-            prefix = source[:position].rstrip("\n")
-            content = f"{prefix}\n\n{additions}\n{source[position:]}"
-            if not content.endswith("\n"):
-                content += "\n"
+            if source.index(LESSONS_START) >= source.index(LESSONS_END):
+                raise MbError("lessons.md managed block markers are out of order", 4)
+            content = _rewrite_block(source, retire_ids, additions)
         else:
+            if LESSONS_END in source:
+                raise MbError("lessons.md has an end marker without a start marker", 4)
             heading = re.search(r"(?m)^#\s+.+$", source)
             block = (
                 f"{LESSONS_START}\n## Verified Lessons\n\n{additions}\n{LESSONS_END}\n"
@@ -173,11 +355,14 @@ def apply_distill(
             else:
                 position = heading.end()
                 content = source[:position] + "\n\n" + block + source[position:]
+        content = _stamp_sequence(content, highest + len(payload.lessons))
         _write_all_or_rollback(((bank / "lessons.md", content),))
         return {
             "bank_path": str(bank),
             "bank_revision": revision_function(bank),
             "lessons_added": len(payload.lessons),
             "lesson_ids": ids,
+            "lessons_retired": len(retire_ids),
+            "retired_ids": sorted(retire_ids),
             "lessons_path": "lessons.md",
         }

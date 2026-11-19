@@ -256,11 +256,14 @@ class DistillTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def _payload(self, lessons: list[dict], revision: str | None = None) -> str:
-        return json.dumps({
+    def _payload(self, lessons: list[dict], revision: str | None = None, retire: list[str] | None = None) -> str:
+        payload = {
             "bank_revision": revision or distill_snapshot(self.bank)["bank_revision"],
             "lessons": lessons,
-        })
+        }
+        if retire:
+            payload["retire"] = retire
+        return json.dumps(payload)
 
     def test_distill_creates_lessons_and_recall_finds_them(self):
         snapshot = distill_snapshot(self.bank)
@@ -308,6 +311,167 @@ class DistillTest(unittest.TestCase):
         (self.bank / "status.md").write_text("# Status\nchanged\n", encoding="utf-8")
         with self.assertRaisesRegex(MbError, "Bank revision changed"):
             apply_distill(self.bank, DistillPayload.from_json(stale))
+
+    def test_snapshot_lists_lessons_for_retirement(self):
+        apply_distill(self.bank, DistillPayload.from_json(self._payload([
+            {"title": "First", "body": "b"},
+        ])))
+        snapshot = distill_snapshot(self.bank)
+        self.assertEqual(snapshot["lessons"], [{"id": "LSN-001", "title": "First"}])
+
+    def test_retire_removes_lesson_and_keeps_remaining_ids_stable(self):
+        apply_distill(self.bank, DistillPayload.from_json(self._payload([
+            {"title": "Wrong conclusion", "body": "old"},
+            {"title": "Still valid", "body": "ok"},
+        ])))
+        result = apply_distill(self.bank, DistillPayload.from_json(self._payload(
+            [], retire=["LSN-001"],
+        )))
+        self.assertEqual(result["lessons_retired"], 1)
+        self.assertEqual(result["retired_ids"], ["LSN-001"])
+        lessons = (self.bank / "lessons.md").read_text(encoding="utf-8")
+        self.assertNotIn("Wrong conclusion", lessons)
+        self.assertIn("### LSN-002 Still valid", lessons)
+        self.assertEqual(
+            [item["id"] for item in distill_snapshot(self.bank)["lessons"]],
+            ["LSN-002"],
+        )
+
+    def test_retire_rejects_unknown_lesson_id(self):
+        with self.assertRaisesRegex(MbError, "unknown lesson id: LSN-004"):
+            apply_distill(self.bank, DistillPayload.from_json(self._payload(
+                [], retire=["LSN-004"],
+            )))
+
+    def test_replaces_overrides_an_existing_lesson(self):
+        apply_distill(self.bank, DistillPayload.from_json(self._payload([
+            {"title": "Pin production images by digest", "body": "old advice"},
+        ])))
+        result = apply_distill(self.bank, DistillPayload.from_json(self._payload([
+            {
+                "title": "Pin production images by digest",
+                "body": "corrected advice",
+                "replaces": "LSN-001",
+            },
+        ])))
+        self.assertEqual(result["lesson_ids"], ["LSN-002"])
+        self.assertEqual(result["retired_ids"], ["LSN-001"])
+        lessons = (self.bank / "lessons.md").read_text(encoding="utf-8")
+        self.assertNotIn("old advice", lessons)
+        self.assertIn("### LSN-002 Pin production images by digest", lessons)
+        self.assertIn("corrected advice", lessons)
+
+    def test_near_duplicate_titles_are_rejected_without_replaces(self):
+        apply_distill(self.bank, DistillPayload.from_json(self._payload([
+            {"title": "Pin production images by digest", "body": "b"},
+        ])))
+        with self.assertRaisesRegex(MbError, "lesson already exists"):
+            apply_distill(self.bank, DistillPayload.from_json(self._payload([
+                {"title": "PIN production images by digest", "body": "c"},
+            ])))
+        with self.assertRaisesRegex(MbError, "too similar to existing LSN-001"):
+            apply_distill(self.bank, DistillPayload.from_json(self._payload([
+                {"title": "Pin production images by digests", "body": "c"},
+            ])))
+
+    def test_retired_ids_are_not_reused(self):
+        apply_distill(self.bank, DistillPayload.from_json(self._payload([
+            {"title": "First", "body": "b"},
+            {"title": "Second", "body": "b"},
+        ])))
+        apply_distill(self.bank, DistillPayload.from_json(self._payload(
+            [], retire=["LSN-002"],
+        )))
+        result = apply_distill(self.bank, DistillPayload.from_json(self._payload([
+            {"title": "Third", "body": "b"},
+        ])))
+        self.assertEqual(result["lesson_ids"], ["LSN-003"])
+
+    def test_payload_rejects_managed_block_markers(self):
+        for title, body in (
+            ("Leak the end marker", "closes with <!-- mb-lite:lessons:end -->"),
+            ("<!-- mb-lite-lesson:LSN-999 -->", "body"),
+        ):
+            with self.subTest(title=title), self.assertRaisesRegex(
+                MbError, "must not contain managed-block markers"
+            ):
+                DistillPayload.from_json(self._payload([
+                    {"title": title, "body": body},
+                ]))
+
+    def test_unmanaged_lesson_ids_are_not_reissued(self):
+        (self.bank / "lessons.md").write_text(
+            "# Lessons\n\n### LSN-001 Hand written lesson\n\nbody\n",
+            encoding="utf-8",
+        )
+        result = apply_distill(self.bank, DistillPayload.from_json(self._payload([
+            {"title": "Managed lesson", "body": "b"},
+        ])))
+        self.assertEqual(result["lesson_ids"], ["LSN-002"])
+        lessons = (self.bank / "lessons.md").read_text(encoding="utf-8")
+        self.assertIn("### LSN-001 Hand written lesson", lessons)
+        self.assertIn("### LSN-002 Managed lesson", lessons)
+
+    def test_blank_line_between_marker_and_heading_is_still_parsed(self):
+        (self.bank / "lessons.md").write_text(
+            "# Lessons\n\n<!-- mb-lite:lessons:start -->\n## Verified Lessons\n\n"
+            "<!-- mb-lite-lesson:LSN-001 -->\n\n### LSN-001 Spaced lesson\n\nbody\n"
+            "<!-- mb-lite:lessons:end -->\n",
+            encoding="utf-8",
+        )
+        snapshot = distill_snapshot(self.bank)
+        self.assertEqual(snapshot["lessons"], [{"id": "LSN-001", "title": "Spaced lesson"}])
+        result = apply_distill(self.bank, DistillPayload.from_json(self._payload(
+            [], retire=["LSN-001"],
+        )))
+        self.assertEqual(result["retired_ids"], ["LSN-001"])
+
+    def test_rewrite_preserves_unmatched_block_text(self):
+        (self.bank / "lessons.md").write_text(
+            "# Lessons\n\n<!-- mb-lite:lessons:start -->\n## Verified Lessons\n\n"
+            "<!-- mb-lite-lesson:LSN-001 -->\n### LSN-001 First\n\none\n\n"
+            "<!-- mb-lite-lesson:LSN-999 -->\nkeep this prose\n\n"
+            "<!-- mb-lite-lesson:LSN-002 -->\n### LSN-002 Second\n\ntwo\n"
+            "<!-- mb-lite:lessons:end -->\n",
+            encoding="utf-8",
+        )
+        apply_distill(self.bank, DistillPayload.from_json(self._payload([
+            {"title": "Third", "body": "three"},
+        ])))
+        lessons = (self.bank / "lessons.md").read_text(encoding="utf-8")
+        self.assertIn("keep this prose", lessons)
+        self.assertIn("### LSN-003 Third", lessons)
+
+    def test_retiring_last_lesson_keeps_trailing_manual_content(self):
+        (self.bank / "lessons.md").write_text(
+            "# Lessons\n\n<!-- mb-lite:lessons:start -->\n## Verified Lessons\n\n"
+            "<!-- mb-lite-lesson:LSN-001 -->\n### LSN-001 First\n\none\n\n"
+            "<!-- mb-lite-lesson:LSN-002 -->\n### LSN-002 Second\n\ntwo\n\n"
+            "### LSN-003 Hand written\n\nmanual note\n\n"
+            "## Manual Notes\n\nkeep this section\n"
+            "<!-- mb-lite:lessons:end -->\n",
+            encoding="utf-8",
+        )
+        apply_distill(self.bank, DistillPayload.from_json(self._payload(
+            [], retire=["LSN-002"],
+        )))
+        lessons = (self.bank / "lessons.md").read_text(encoding="utf-8")
+        self.assertNotIn("LSN-002", lessons)
+        for expected in ("LSN-001 First", "LSN-003 Hand written", "manual note", "keep this section"):
+            self.assertIn(expected, lessons)
+
+    def test_out_of_order_markers_are_rejected_without_writing(self):
+        source = (
+            "<!-- mb-lite:lessons:end -->\n# Lessons\n\nintro\n"
+            "<!-- mb-lite:lessons:start -->\n## Verified Lessons\n\n"
+            "<!-- mb-lite-lesson:LSN-001 -->\n### LSN-001 First\n\none\n"
+        )
+        (self.bank / "lessons.md").write_text(source, encoding="utf-8")
+        with self.assertRaisesRegex(MbError, "out of order"):
+            apply_distill(self.bank, DistillPayload.from_json(self._payload(
+                [{"title": "New", "body": "b"}],
+            )))
+        self.assertEqual((self.bank / "lessons.md").read_text(encoding="utf-8"), source)
 
 
 if __name__ == "__main__":

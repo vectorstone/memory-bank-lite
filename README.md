@@ -9,12 +9,13 @@ inside a configured `claude-obsidian` vault. Stable knowledge reaches
 
 ```text
 config set-vault PATH
+config show
 init [--adopt PROJECT_ID]
 init --workspace --name NAME [--member PATH ...] [--convert-project]
 workspace add|remove PATH
 start [--section SECTION]
 done --revision|--apply
-recall QUERY [--vault|--expand ID]
+recall QUERY [--vault|--all-banks|--expand ID]
 compact [--apply] [--project-id PROJECT_ID]
 distill --revision|--apply
 publish --snapshot|--preview|--apply
@@ -32,7 +33,8 @@ rolls progress entries beyond 15 entries / 32 KB verbatim into
 `archive/attention.md`, so Banks stay bounded without losing history; `recall`
 still searches the archive. `compact` applies the same housekeeping on demand
 to Banks that predate the limits, and `distill` promotes stable conclusions
-from progress entries into `lessons.md` (human-confirmed, boosted in recall).
+from progress entries into `lessons.md` (human-confirmed, ranked first in
+recall, with `retire`/`replaces` for lessons that stop being true).
 
 Workspace initialization previews candidate members before `--confirm-members`
 writes anything. If the exact Workspace root is already bound to a Project,

@@ -46,7 +46,6 @@ _SOURCES = (
     "roadmap.md",
     "research.md",
 )
-LESSONS_BOOST = 1.5
 
 
 def _files(bank: Path) -> list[tuple[str, str]]:
@@ -110,8 +109,22 @@ def _score(haystack: str, terms: list[str], weights: list[float]) -> float:
     return float(sum(haystack.count(term) * weight for term, weight in zip(terms, weights)))
 
 
-def _path_boost(path: str) -> float:
-    return LESSONS_BOOST if path.rsplit("/", 1)[-1] == "lessons.md" else 1.0
+def _source_rank(path: str) -> int:
+    """Distilled lessons form the first tier; raw progress never outranks them."""
+    return 0 if path == "lessons.md" else 1
+
+
+def bound_expand(text: str, absolute_path: str, limit: int) -> str:
+    """Cap an expanded chunk and point at the file holding the rest."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return text
+    notice = (
+        f"\n\n[... expanded section truncated at {limit} bytes; "
+        f"read {absolute_path} for the rest]"
+    )
+    budget = max(limit - len(notice.encode("utf-8")), 0)
+    return encoded[:budget].decode("utf-8", "ignore").rstrip() + notice
 
 
 def search(bank: Path, query: str) -> list[RecallResult]:
@@ -125,7 +138,7 @@ def search(bank: Path, query: str) -> list[RecallResult]:
     weights = _idf_weights(haystacks, terms)
     results: list[tuple[float, RecallResult]] = []
     for (relative, heading, offset, body), haystack in zip(candidates, haystacks):
-        score = _score(haystack, terms, weights) * _path_boost(relative)
+        score = _score(haystack, terms, weights)
         if score > 0:
             results.append(
                 (
@@ -139,7 +152,11 @@ def search(bank: Path, query: str) -> list[RecallResult]:
                     ),
                 )
             )
-    results.sort(key=lambda item: (-item[0], item[1].path, item[1].offset))
+    results.sort(
+        key=lambda item: (
+            _source_rank(item[1].path), -item[0], item[1].path, item[1].offset
+        )
+    )
     return [result for _, result in results[:10]]
 
 
@@ -174,7 +191,7 @@ def document_search(documents: tuple[Document, ...], query: str) -> list[ScopedR
     weights = _idf_weights(haystacks, terms)
     matches: list[tuple[float, ScopedRecallResult]] = []
     for (layer, scope_id, path, heading, offset, body), haystack in zip(candidates, haystacks):
-        score = _score(haystack, terms, weights) * _path_boost(path)
+        score = _score(haystack, terms, weights)
         if score > 0:
             matches.append(
                 (
@@ -192,7 +209,12 @@ def document_search(documents: tuple[Document, ...], query: str) -> list[ScopedR
             )
     matches.sort(
         key=lambda item: (
-            -item[0], item[1].layer, item[1].scope_id, item[1].path, item[1].offset
+            _source_rank(item[1].path),
+            -item[0],
+            item[1].layer,
+            item[1].scope_id,
+            item[1].path,
+            item[1].offset,
         )
     )
     return [result for _, result in matches[:10]]

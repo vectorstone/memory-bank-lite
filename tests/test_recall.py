@@ -4,7 +4,13 @@ import unittest
 from pathlib import Path
 
 from scripts.mb_lite.errors import MbError
-from scripts.mb_lite.recall import RecallResult, expand_result, search
+from scripts.mb_lite.recall import (
+    RecallResult,
+    bound_expand,
+    document_search,
+    expand_result,
+    search,
+)
 
 
 class RecallTests(unittest.TestCase):
@@ -86,6 +92,25 @@ class RecallTests(unittest.TestCase):
                 (bank / directory_name).symlink_to(outside_dir, target_is_directory=True)
 
                 self.assertEqual(search(bank, "registry"), [])
+
+    def test_distilled_lessons_form_the_first_result_tier(self):
+        documents = tuple(
+            ("bank", "proj", "progress.md", f"# Entry {index}\n" + "architecture " * 10)
+            for index in range(10)
+        ) + (
+            ("bank", "proj", "lessons.md", "### LSN-001 Architecture rule\narchitecture layer\n"),
+        )
+        results = document_search(documents, "architecture")
+        self.assertEqual(results[0].path, "lessons.md")
+        self.assertEqual(len(results), 10)
+
+    def test_bound_expand_truncates_and_points_at_the_file(self):
+        text = "# Big\n" + "line\n" * 10000
+        bounded = bound_expand(text, "/tmp/bank/notes/big.md", 512)
+        self.assertLessEqual(len(bounded.encode("utf-8")), 512)
+        self.assertTrue(bounded.startswith("# Big"))
+        self.assertIn("read /tmp/bank/notes/big.md for the rest", bounded)
+        self.assertEqual(bound_expand("small", "/tmp/bank/notes/small.md", 512), "small")
 
 
 if __name__ == "__main__":
