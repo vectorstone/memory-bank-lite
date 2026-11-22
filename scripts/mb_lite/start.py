@@ -200,7 +200,7 @@ def _handoff_context(bank: Path) -> list[str]:
     return [line.rstrip() for line in lines]
 
 
-def _insert_handoff(output: str, lines: list[str]) -> str:
+def _insert_handoff(output: str, lines: list[str], max_bytes: int = MAX_BYTES) -> str:
     """Insert the handoff section, dropping trailing lines under size pressure.
 
     The handoff outranks the attention and member summaries that are appended
@@ -220,12 +220,12 @@ def _insert_handoff(output: str, lines: list[str]) -> str:
             body_lines.append(f"- ... {omitted} handoff lines omitted; use start --section handoff")
         body = "\n".join(body_lines)
         candidate = output.replace(marker, f"\n\n## Handoff\n\n{body}{marker}", 1)
-        if len(body.encode("utf-8")) <= HANDOFF_MAX_BYTES and len(candidate.encode("utf-8")) <= MAX_BYTES:
+        if len(body.encode("utf-8")) <= HANDOFF_MAX_BYTES and len(candidate.encode("utf-8")) <= max_bytes:
             return candidate
         visible.pop()
     dropped = f"- ... {len(lines)} handoff lines omitted; use start --section handoff"
     candidate = output.replace(marker, f"\n\n## Handoff\n\n{dropped}{marker}", 1)
-    if len(candidate.encode("utf-8")) <= MAX_BYTES:
+    if len(candidate.encode("utf-8")) <= max_bytes:
         return candidate
     return output
 
@@ -234,13 +234,17 @@ def _omitted_attention_notice(count: int) -> str:
     return f"- ... {count} attention items omitted; use start --section attention"
 
 
-def _insert_attention(output: str, attention: list[str]) -> str:
+def _insert_attention(output: str, attention: list[str], max_bytes: int = MAX_BYTES) -> str:
     """Insert the attention block before Open Items, degrading under pressure.
 
     Entries are dropped lowest-severity first (the list arrives sorted high to
     low) and every drop is counted in an explicit notice, so nothing disappears
-    silently. Only a Bank whose protected sections leave no room for even the
-    notice fails closed, mirroring the protected-section contract.
+    silently. max_bytes may sit below MAX_BYTES when the caller reserved room
+    for its own tail blocks; if even the omission notice cannot fit that
+    reduced budget, it still degrades within the hard cap rather than failing
+    closed, so protected sections keep priority. Only a Bank whose protected
+    sections leave no room for even the notice at the hard cap fails closed,
+    mirroring the protected-section contract.
     """
     marker = "\n\n## Open Items\n\n"
     if marker not in output:
@@ -251,11 +255,15 @@ def _insert_attention(output: str, attention: list[str]) -> str:
             lines.append(_omitted_attention_notice(len(attention) - shown))
         block = "\n\n## Attention\n\n" + "\n".join(lines)
         candidate = output.replace(marker, block + marker, 1)
-        if len(candidate.encode("utf-8")) <= MAX_BYTES:
+        if len(candidate.encode("utf-8")) <= max_bytes:
             return candidate
     notice_block = "\n\n## Attention\n\n" + _omitted_attention_notice(len(attention))
     candidate = output.replace(marker, notice_block + marker, 1)
+    if len(candidate.encode("utf-8")) <= max_bytes:
+        return candidate
     if len(candidate.encode("utf-8")) <= MAX_BYTES:
+        # The caller's extra reserve over-promised; keep the notice within the
+        # hard cap so protected sections and this block beat the reserve.
         return candidate
     raise MbError("protected start sections exceed 8192 bytes after attention", 1)
 
@@ -279,7 +287,27 @@ def _attention_reserve(lines: list[str]) -> int:
     return marker + smallest + notice
 
 
-def build_v2_start_context(bank: Path, section: str | None = None) -> str:
+def _omitted_members_notice(count: int) -> str:
+    return f"- ... {count} member summaries omitted"
+
+
+def _members_reserve(members: list[str]) -> int:
+    """Bytes guaranteed to the Members block: its heading plus room for the
+    shortest member line and the omission notice (or the empty placeholder)."""
+    marker = len("\n\n## Members\n\n".encode("utf-8"))
+    if not members:
+        return marker + len("No member summaries available.".encode("utf-8"))
+    smallest = min(len(line.encode("utf-8")) for line in members)
+    notice = len(_omitted_members_notice(len(members)).encode("utf-8"))
+    return marker + smallest + notice
+
+
+def build_v2_start_context(
+    bank: Path,
+    section: str | None = None,
+    *,
+    extra_reserve: int = 0,
+) -> str:
     validate_v2_bank(bank)
     attention = _attention_context(bank)
     handoff = _handoff_context(bank)
@@ -296,8 +324,15 @@ def build_v2_start_context(bank: Path, section: str | None = None) -> str:
     if section is None:
         # Trim optional content against the cap minus the mandatory tail, so the
         # v1 trim loop cannot pack recent progress up to the full cap and starve
-        # the handoff/attention block (2026-11-08 incident).
-        budget = MAX_BYTES - _handoff_reserve(handoff) - _attention_reserve(attention)
+        # the handoff/attention block (2026-11-08 incident). extra_reserve carves
+        # out room for tail blocks appended by the caller, such as the workspace
+        # Members section (2026-11-22 incident).
+        budget = (
+            MAX_BYTES
+            - _handoff_reserve(handoff)
+            - _attention_reserve(attention)
+            - extra_reserve
+        )
         base = build_start_context(bank, None, max_bytes=budget)
     else:
         base = build_start_context(bank, section)
@@ -305,8 +340,9 @@ def build_v2_start_context(bank: Path, section: str | None = None) -> str:
         return base
     if not attention:
         attention = ["No active attention."]
-    output = _insert_handoff(base, handoff)
-    return _insert_attention(output, attention)
+    cap = MAX_BYTES - extra_reserve
+    output = _insert_handoff(base, handoff, cap)
+    return _insert_attention(output, attention, cap)
 
 
 def build_workspace_start_context(
@@ -314,6 +350,14 @@ def build_workspace_start_context(
     member_contexts: tuple[tuple[str, str], ...],
     section: str | None = None,
 ) -> str:
+    """Assemble the Workspace start context.
+
+    The Members block is a mandatory tail, so its budget is reserved up front
+    (heading plus the shortest member line and the omission notice) instead of
+    letting the v1 trim loop pack the workspace Bank up to the cap. Under size
+    pressure members degrade to a counted notice — down to zero visible
+    members — before failing closed.
+    """
     lines = [f"- {name}: {context}" for name, context in member_contexts]
     members = lines or ["No member summaries available."]
     if section == "members":
@@ -321,19 +365,17 @@ def build_workspace_start_context(
         if len(output.encode("utf-8")) > MAX_BYTES:
             raise MbError("start section members exceeds 8192 bytes; use recall", 1)
         return output
-    base = build_v2_start_context(bank, section)
     if section is not None:
-        return base
+        return build_v2_start_context(bank, section)
+    base = build_v2_start_context(bank, None, extra_reserve=_members_reserve(members))
     marker = "\n\n## Open Items\n\n"
-    omitted = 0
-    while True:
-        visible = members[: max(1, len(members) - omitted)]
-        body = "\n".join(visible)
-        if omitted:
-            body += f"\n- ... {omitted} member summaries omitted"
-        output = base.replace(marker, f"\n\n## Members\n\n{body}" + marker, 1)
-        if len(output.encode("utf-8")) <= MAX_BYTES:
-            return output
-        if len(visible) <= 1:
-            raise MbError("Workspace start output exceeds 8192 bytes", 1)
-        omitted += 1
+    for shown in range(len(members), -1, -1):
+        body_lines = members[:shown]
+        if shown < len(members):
+            body_lines.append(_omitted_members_notice(len(members) - shown))
+        candidate = base.replace(
+            marker, "\n\n## Members\n\n" + "\n".join(body_lines) + marker, 1
+        )
+        if len(candidate.encode("utf-8")) <= MAX_BYTES:
+            return candidate
+    raise MbError("Workspace start output exceeds 8192 bytes after member trimming", 1)

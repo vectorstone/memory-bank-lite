@@ -7,7 +7,11 @@ from scripts.mb_lite.attention import AttentionEntry, render_attention
 from scripts.mb_lite.bank import initialize_bank
 from scripts.mb_lite.errors import MbError
 from scripts.mb_lite.handoff import compose_handoff_file
-from scripts.mb_lite.start import build_start_context, build_v2_start_context
+from scripts.mb_lite.start import (
+    build_start_context,
+    build_v2_start_context,
+    build_workspace_start_context,
+)
 
 
 class StartTests(unittest.TestCase):
@@ -258,6 +262,122 @@ class V2StartLessonsTests(unittest.TestCase):
             bank = self.make_bank(Path(root))
             output = build_v2_start_context(bank, "lessons")
             self.assertIn("LSN-005 Lesson title 5", output)
+
+
+class WorkspaceStartBudgetTests(unittest.TestCase):
+    """Regression tests for the 2026-11-22 workspace start-budget incident.
+
+    ``build_workspace_start_context`` used to hard-fail with "Workspace start
+    output exceeds 8192 bytes" on the sub-store workspace: the v1 trim loop
+    packed the workspace Bank against the full cap without reserving the
+    Members block, and the degradation loop refused to drop the last member.
+    Members must instead get a reserved budget up front (the sibling of the
+    2026-11-08 handoff/attention fix) and degrade with a counted omission
+    notice — down to zero visible members — before failing closed.
+    """
+
+    def make_small_bank(self, root: Path) -> Path:
+        bank = Path(root) / ".memory-bank"
+        initialize_bank(bank)
+        (bank / "status.md").write_text(
+            "**Focus:** workspace registry\n**Next:** ship\n**Blockers:** None\n",
+            encoding="utf-8",
+        )
+        (bank / "checklist.md").write_text("# Checklist\n\n- [ ] one item\n", encoding="utf-8")
+        (bank / "progress.md").write_text("", encoding="utf-8")
+        return bank
+
+    def make_packed_bank(self, root: Path) -> Path:
+        """Recent progress sized to pack the v1 render near the cap, like the
+        incident workspace, so only a reserved Members block still fits."""
+        bank = self.make_small_bank(root)
+        overhead = len(build_start_context(bank).encode("utf-8"))
+        recent_heading = len("\n\n## Recent Progress\n\n".encode("utf-8"))
+        target = 7650 - overhead - recent_heading - 4
+        shares = (0.05, 0.475, 0.475)
+        entries = []
+        for index, share in enumerate(shares, start=1):
+            marker = f"<!-- mb-lite-entry:20261122T120000Z-0000000{index} -->"
+            heading = f"### 2026-11-22 12:00:00 - session summary {index}"
+            body = "p" * max(0, int(target * share) - len(marker) - len(heading) - 2)
+            entries.append(f"{marker}\n{heading}\n{body}")
+        (bank / "progress.md").write_text("\n\n".join(entries) + "\n", encoding="utf-8")
+        return bank
+
+    def member(self, name: str, size: int) -> tuple[str, str]:
+        prefix = f"- {name}: "
+        return name, "m" * max(0, size - len(prefix))
+
+    def test_packed_bank_reserves_member_budget_with_counted_omission(self):
+        with tempfile.TemporaryDirectory() as root:
+            bank = self.make_packed_bank(Path(root))
+            members = (self.member("alpha", 700), self.member("beta", 700))
+            before = {p: p.read_bytes() for p in bank.rglob("*") if p.is_file()}
+            output = build_workspace_start_context(bank, members)
+            self.assertLessEqual(len(output.encode("utf-8")), 8192)
+            self.assertIn("## Members", output)
+            self.assertIn("- alpha:", output)
+            self.assertIn("- ... 1 member summaries omitted", output)
+            self.assertNotIn("- beta:", output)
+            self.assertEqual(before, {p: p.read_bytes() for p in bank.rglob("*") if p.is_file()})
+
+    def test_first_member_too_large_degrades_to_counted_notice_only(self):
+        with tempfile.TemporaryDirectory() as root:
+            bank = self.make_packed_bank(Path(root))
+            members = (self.member("alpha", 6000), self.member("beta", 50))
+            output = build_workspace_start_context(bank, members)
+            self.assertLessEqual(len(output.encode("utf-8")), 8192)
+            self.assertIn("## Members", output)
+            self.assertIn("- ... 2 member summaries omitted", output)
+            self.assertNotIn("alpha", output)
+            self.assertNotIn("beta", output)
+
+    def test_shortest_member_is_guaranteed_when_the_first_is_too_large(self):
+        with tempfile.TemporaryDirectory() as root:
+            bank = self.make_packed_bank(Path(root))
+            members = (self.member("alpha", 60), self.member("beta", 7000))
+            output = build_workspace_start_context(bank, members)
+            self.assertLessEqual(len(output.encode("utf-8")), 8192)
+            self.assertIn("- alpha:", output)
+            self.assertIn("- ... 1 member summaries omitted", output)
+            self.assertNotIn("- beta:", output)
+
+    def test_unpacked_bank_shows_every_member_without_omission(self):
+        with tempfile.TemporaryDirectory() as root:
+            bank = self.make_small_bank(Path(root))
+            members = (self.member("alpha", 700), self.member("beta", 700))
+            output = build_workspace_start_context(bank, members)
+            self.assertLessEqual(len(output.encode("utf-8")), 8192)
+            self.assertIn("- alpha:", output)
+            self.assertIn("- beta:", output)
+            self.assertNotIn("member summaries omitted", output)
+
+    def test_protected_sections_beat_an_over_promised_member_reserve(self):
+        # A single pathological member line reserves more than the cap has to
+        # give; protected sections must still start instead of failing closed.
+        with tempfile.TemporaryDirectory() as root:
+            bank = self.make_small_bank(Path(root))
+            members = (self.member("alpha", 8100),)
+            output = build_workspace_start_context(bank, members)
+            self.assertLessEqual(len(output.encode("utf-8")), 8192)
+            self.assertIn("## Members", output)
+            self.assertIn("- ... 1 member summaries omitted", output)
+            self.assertNotIn("alpha", output)
+
+    def test_workspace_without_members_keeps_placeholder_block(self):
+        with tempfile.TemporaryDirectory() as root:
+            bank = self.make_small_bank(Path(root))
+            output = build_workspace_start_context(bank, ())
+            self.assertIn("## Members", output)
+            self.assertIn("No member summaries available.", output)
+
+    def test_members_section_returns_every_member_line(self):
+        with tempfile.TemporaryDirectory() as root:
+            bank = self.make_small_bank(Path(root))
+            members = (self.member("alpha", 700), self.member("beta", 700))
+            output = build_workspace_start_context(bank, members, "members")
+            self.assertIn("- alpha:", output)
+            self.assertIn("- beta:", output)
 
 
 if __name__ == "__main__":
